@@ -3,6 +3,7 @@ import datetime
 import pymongo
 
 from mongoengine import *
+from mongoengine.base import BaseField
 from mongoengine.connection import _get_db
 
 
@@ -49,6 +50,47 @@ class DocumentTest(unittest.TestCase):
         # Ensure Document isn't treated like an actual document
         self.assertFalse(hasattr(Document, '_fields'))
 
+    def test_dynamic_fields(self):
+        """Ensure that dynamic fields can be defined on document.
+        """
+        test_person = self.Person(name='Test')
+        test_field = 'test_field'
+        test_value = 'test_value'
+
+        # Attempt to set a dynamic field
+        test_person.create_dynamic_field(test_field, test_value)
+        test = test_person._dynamic_fields.has_key(test_field)
+        self.assertTrue(test)
+
+        test_person.save()
+        test_person = None
+        
+        # Check that dynamic fields are being synced to database
+        collection = self.db[self.Person._meta['collection']]
+        test_person = collection.find_one({'name': 'Test'})
+        self.assertTrue(test_person.has_key(test_field))
+        self.assertEqual(test_person[test_field], test_value)
+        self.assertTrue(test_person.has_key('_dynamic_fields_list'))
+        self.assertTrue(test_field in test_person['_dynamic_fields_list'])
+
+        # Test that mongoengine successfully interprets dynamic fields
+        test_person = None
+        test_person = self.Person.objects.get(name='Test')
+        
+        # Check for existence of dynamically created field
+        self.assertTrue(test_field in test_person._fields)
+        self.assertTrue(isinstance(test_person._fields[test_field], BaseField))
+        self.assertEqual(test_person.test_field, test_value)
+
+        # Make sure dynamic fields are preserved after initial set and get
+        test_value_2 = 'test_value_2'
+        test_person.test_field = test_value_2
+        test_person.save()
+        test_person_2 = self.Person.objects.get(name='Test')
+        self.assertTrue(test_field in test_person_2._fields)
+        self.assertTrue(isinstance(test_person_2._fields[test_field], BaseField))
+        self.assertEqual(test_person_2.test_field, test_value_2)
+        
     def test_get_superclasses(self):
         """Ensure that the correct list of superclasses is assembled.
         """

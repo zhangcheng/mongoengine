@@ -253,6 +253,7 @@ class BaseDocument(object):
 
     def __init__(self, **values):
         self._data = {}
+        self._dynamic_fields = {}
         # Assign initial values to instance
         for attr_name, attr_value in self._fields.items():
             if attr_name in values:
@@ -384,6 +385,13 @@ class BaseDocument(object):
         for field_name, field in cls._fields.items():
             if field.name in data:
                 data[field_name] = field.to_python(data[field.name])
+
+        if '_dynamic_fields_list' in data:
+            dynamic_fields_list = data['_dynamic_fields_list']
+            del data['_dynamic_fields_list']
+            for field_name in dynamic_fields_list:
+                cls._fields[field_name] = BaseField(name=field_name)
+                data[field_name] = field.to_python(data[field_name])
 
         obj = cls(**data)
         obj._present_fields = present_fields
