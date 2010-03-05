@@ -70,7 +70,8 @@ class Document(BaseDocument):
         """
         self.validate()
         doc = self.to_mongo()
-        # Also check for any dynamic fields that were set
+        # Also check for any dynamic fields that were set and write them to the
+        # database as well.
         for field_name, field in self._dynamic_fields.items():
             if field_name in self._data.keys():
                 doc[field_name] = self._data[field_name]
@@ -122,13 +123,15 @@ class Document(BaseDocument):
 
 
     def create_dynamic_field(self, field_name, field_value=None):
+        """Creates a new dynamic field on the object.
+        """
         if not self._dynamic_fields.has_key(field_name) and not self._fields.has_key(field_name):
             self._dynamic_fields[field_name] = BaseField(name=field_name)
             self._data[field_name] = field_value
 
             if not '_dynamic_fields_list' in self._dynamic_fields.keys():
                 self._dynamic_fields['_dynamic_fields_list'] = BaseField(name='_dynamic_fields_list')
-                dynamic_fields_list = list()
+                dynamic_fields_list = ['_dynamic_fields_list']
             else:
                 dynamic_fields_list = self._data['_dynamic_fields_list']
             dynamic_fields_list.append(field_name)
