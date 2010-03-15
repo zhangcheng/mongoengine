@@ -3,8 +3,15 @@ from queryset import QuerySet, QuerySetManager
 import pymongo
 
 
+_document_registry = {}
+
+def get_document(name):
+    return _document_registry[name]
+
+
 class ValidationError(Exception):
     pass
+
 
 class BaseField(object):
     """A base class for fields in a MongoDB document. Instances of this class
@@ -79,7 +86,8 @@ class ObjectIdField(BaseField):
             try:
                 return pymongo.objectid.ObjectId(str(value))
             except Exception, e:
-                raise ValidationError(e.message)
+                #e.message attribute has been deprecated since Python 2.6
+                raise ValidationError(str(e))
         return value
 
     def prepare_query_value(self, op, value):
@@ -149,7 +157,11 @@ class DocumentMetaclass(type):
                 doc_fields[attr_name] = attr_value
         attrs['_fields'] = doc_fields
 
-        return super_new(cls, name, bases, attrs)
+        new_class = super_new(cls, name, bases, attrs)
+        for field in new_class._fields.values():
+            field.owner_document = new_class
+
+        return new_class
 
 
 class TopLevelDocumentMetaclass(DocumentMetaclass):
@@ -158,6 +170,8 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
     """
 
     def __new__(cls, name, bases, attrs):
+        global _document_registry
+
         super_new = super(TopLevelDocumentMetaclass, cls).__new__
         # Classes defined in this package are abstract and should not have 
         # their own metadata with DB collection, etc.
@@ -245,6 +259,8 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
         if not new_class._meta['id_field']:
             new_class._meta['id_field'] = 'id'
             new_class.id = new_class._fields['id'] = ObjectIdField(name='_id')
+
+        _document_registry[name] = new_class
 
         return new_class
 
@@ -401,7 +417,7 @@ class BaseDocument(object):
         return obj
     
     def __eq__(self, other):
-        assert hasattr(other, 'id'), "You cannot compare two objects of different type."
-        if self.id == other.id:
-            return True
+        if isinstance(other, self.__class__) and hasattr(other, 'id'):
+            if self.id == other.id:
+                return True
         return False

@@ -1,4 +1,4 @@
-from base import BaseField, ObjectIdField, ValidationError
+from base import BaseField, ObjectIdField, ValidationError, get_document
 from document import Document, EmbeddedDocument
 from connection import _get_db
 
@@ -8,10 +8,13 @@ import datetime
 import decimal
 
 
-__all__ = ['StringField', 'IntField', 'FloatField', 'BooleanField', 
+__all__ = ['StringField', 'IntField', 'FloatField', 'BooleanField',
            'DateTimeField', 'EmbeddedDocumentField', 'ListField', 'DictField',
            'ObjectIdField', 'ReferenceField', 'ValidationError',
-           'DecimalField', 'URLField']
+           'DecimalField', 'URLField', 'GenericReferenceField',
+           'BinaryField']
+
+RECURSIVE_REFERENCE_CONSTANT = 'self'
 
 
 class StringField(BaseField):
@@ -39,24 +42,56 @@ class StringField(BaseField):
     def lookup_member(self, member_name):
         return None
 
+    def prepare_query_value(self, op, value):
+        if not isinstance(op, basestring):
+            return value
 
-class URLField(BaseField):
+        if op.lstrip('i') in ('startswith', 'endswith', 'contains'):
+            flags = 0
+            if op.startswith('i'):
+                flags = re.IGNORECASE
+                op = op.lstrip('i')
+
+            regex = r'%s'
+            if op == 'startswith':
+                regex = r'^%s'
+            elif op == 'endswith':
+                regex = r'%s$'
+            value = re.compile(regex % value, flags)
+        return value
+
+
+class URLField(StringField):
     """A field that validates input as a URL.
+
+    .. versionadded:: 0.3
     """
 
-    def __init__(self, verify_exists=True, **kwargs):
+    URL_REGEX = re.compile(
+        r'^https?://'
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'
+        r'localhost|'
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
+        r'(?::\d+)?'
+        r'(?:/?|[/?]\S+)$', re.IGNORECASE
+    )
+
+    def __init__(self, verify_exists=False, **kwargs):
         self.verify_exists = verify_exists
         super(URLField, self).__init__(**kwargs)
 
     def validate(self, value):
-        import urllib2
+        if not URLField.URL_REGEX.match(value):
+            raise ValidationError('Invalid URL: %s' % value)
 
         if self.verify_exists:
+            import urllib2
             try:
                 request = urllib2.Request(value)
                 response = urllib2.urlopen(request)
             except Exception, e:
-                raise ValidationError('This URL appears to be invalid: %s' % e)
+                message = 'This URL appears to be a broken link: %s' % e
+                raise ValidationError(message)
 
 
 class IntField(BaseField):
@@ -108,6 +143,8 @@ class FloatField(BaseField):
 
 class DecimalField(BaseField):
     """A fixed-point decimal number field.
+
+    .. versionadded:: 0.3
     """
 
     def __init__(self, min_value=None, max_value=None, **kwargs):
@@ -131,7 +168,7 @@ class DecimalField(BaseField):
         if self.min_value is not None and value < self.min_value:
             raise ValidationError('Decimal value is too small')
 
-        if self.max_value is not None and vale > self.max_value:
+        if self.max_value is not None and value > self.max_value:
             raise ValidationError('Decimal value is too large')
 
 
@@ -217,7 +254,7 @@ class ListField(BaseField):
 
         if isinstance(self.field, ReferenceField):
             referenced_type = self.field.document_type
-            # Get value from document instance if available
+            # Get value from document instance if available 
             value_list = instance._data.get(self.name)
             if value_list:
                 deref_list = []
@@ -229,7 +266,19 @@ class ListField(BaseField):
                     else:
                         deref_list.append(value)
                 instance._data[self.name] = deref_list
-        
+
+        if isinstance(self.field, GenericReferenceField):
+            value_list = instance._data.get(self.name)
+            if value_list:
+                deref_list = []
+                for value in value_list:
+                    # Dereference DBRefs
+                    if isinstance(value, (dict, pymongo.son.SON)):
+                        deref_list.append(self.field.dereference(value))
+                    else:
+                        deref_list.append(value)
+                instance._data[self.name] = deref_list
+
         return super(ListField, self).__get__(instance, owner)
 
     def to_python(self, value):
@@ -264,7 +313,7 @@ class DictField(BaseField):
     """A dictionary field that wraps a standard Python dictionary. This is
     similar to an embedded document, but the structure is not defined.
 
-    .. versionadded:: 0.2.3
+    .. versionadded:: 0.3
     """
 
     def validate(self, value):
@@ -272,10 +321,10 @@ class DictField(BaseField):
         """
         if not isinstance(value, dict):
             raise ValidationError('Only dictionaries may be used in a '
-                                  'DictField') 
+                                  'DictField')
 
         if any(('.' in k or '$' in k) for k in value):
-            raise ValidationError('Invalid dictionary key name - keys may not ' 
+            raise ValidationError('Invalid dictionary key name - keys may not '
                                   'contain "." or "$" characters')
 
     def lookup_member(self, member_name):
@@ -288,12 +337,22 @@ class ReferenceField(BaseField):
     """
 
     def __init__(self, document_type, **kwargs):
-        if not issubclass(document_type, Document):
-            raise ValidationError('Argument to ReferenceField constructor '
-                                  'must be a top level document class')
-        self.document_type = document_type
+        if not isinstance(document_type, basestring):
+            if not issubclass(document_type, (Document, basestring)):
+                raise ValidationError('Argument to ReferenceField constructor '
+                                      'must be a document class or a string')
+        self.document_type_obj = document_type
         self.document_obj = None
         super(ReferenceField, self).__init__(**kwargs)
+
+    @property
+    def document_type(self):
+        if isinstance(self.document_type_obj, basestring):
+            if self.document_type_obj == RECURSIVE_REFERENCE_CONSTANT:
+                self.document_type_obj = self.owner_document
+            else:
+                self.document_type_obj = get_document(self.document_type_obj)
+        return self.document_type_obj
 
     def __get__(self, instance, owner):
         """Descriptor to allow lazy dereferencing.
@@ -337,3 +396,70 @@ class ReferenceField(BaseField):
 
     def lookup_member(self, member_name):
         return self.document_type._fields.get(member_name)
+
+
+class GenericReferenceField(BaseField):
+    """A reference to *any* :class:`~mongoengine.document.Document` subclass
+    that will be automatically dereferenced on access (lazily).
+
+    .. versionadded:: 0.3
+    """
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self
+
+        value = instance._data.get(self.name)
+        if isinstance(value, (dict, pymongo.son.SON)):
+            instance._data[self.name] = self.dereference(value)
+
+        return super(GenericReferenceField, self).__get__(instance, owner)
+
+    def dereference(self, value):
+        doc_cls = get_document(value['_cls'])
+        reference = value['_ref']
+        doc = _get_db().dereference(reference)
+        if doc is not None:
+            doc = doc_cls._from_son(doc)
+        return doc
+
+    def to_mongo(self, document):
+        id_field_name = document.__class__._meta['id_field']
+        id_field = document.__class__._fields[id_field_name]
+
+        if isinstance(document, Document):
+            # We need the id from the saved object to create the DBRef
+            id_ = document.id
+            if id_ is None:
+                raise ValidationError('You can only reference documents once '
+                                      'they have been saved to the database')
+        else:
+            id_ = document
+
+        id_ = id_field.to_mongo(id_)
+        collection = document._meta['collection']
+        ref = pymongo.dbref.DBRef(collection, id_)
+        return {'_cls': document.__class__.__name__, '_ref': ref}
+
+    def prepare_query_value(self, op, value):
+        return self.to_mongo(value)['_ref']
+
+class BinaryField(BaseField):
+    """A binary data field.
+    """
+
+    def __init__(self, max_bytes=None, **kwargs):
+        self.max_bytes = max_bytes
+        super(BinaryField, self).__init__(**kwargs)
+
+    def to_mongo(self, value):
+        return pymongo.binary.Binary(value)
+
+    def to_python(self, value):
+        return str(value)
+
+    def validate(self, value):
+        assert isinstance(value, str)
+
+        if self.max_bytes is not None and len(value) > self.max_bytes:
+            raise ValidationError('Binary value is too long')

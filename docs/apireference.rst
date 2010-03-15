@@ -36,9 +36,13 @@ Fields
 
 .. autoclass:: mongoengine.StringField
 
+.. autoclass:: mongoengine.URLField
+
 .. autoclass:: mongoengine.IntField
 
 .. autoclass:: mongoengine.FloatField
+
+.. autoclass:: mongoengine.DecimalField
 
 .. autoclass:: mongoengine.BooleanField
 
@@ -50,6 +54,10 @@ Fields
 
 .. autoclass:: mongoengine.ListField
 
+.. autoclass:: mongoengine.BinaryField
+
 .. autoclass:: mongoengine.ObjectIdField
 
 .. autoclass:: mongoengine.ReferenceField
+
+.. autoclass:: mongoengine.GenericReferenceField
