@@ -121,7 +121,6 @@ class Document(BaseDocument):
         db = _get_db()
         db.drop_collection(cls._meta['collection'])
 
-
     def create_dynamic_field(self, field_name, field_value=None):
         """Creates a new dynamic field on the object.
         """
@@ -140,4 +139,42 @@ class Document(BaseDocument):
             message = u'Field %s already exists' % field_name
             raise OperationError(message)
 
+class MapReduceDocument(object):
+    """A document returned from a map/reduce query.
+    
+    :param collection: An instance of :class:`~pymongo.Collection`
+    :param key: Document/result key, often an instance of 
+                :class:`~pymongo.objectid.ObjectId`. If supplied as 
+                an ``ObjectId`` found in the given ``collection``, 
+                the object can be accessed via the ``object`` property.
+    :param value: The result(s) for this key.
+    
+    .. versionadded:: 0.3
+    """
+    
+    def __init__(self, document, collection, key, value):
+        self._document = document
+        self._collection = collection
+        self.key = key
+        self.value = value
+    
+    @property
+    def object(self):
+        """Lazy-load the object referenced by ``self.key``. ``self.key`` 
+        should be the ``primary_key``.
+        """
+        id_field = self._document()._meta['id_field']
+        id_field_type = type(id_field)
         
+        if not isinstance(self.key, id_field_type):
+            try:
+                self.key = id_field_type(self.key)
+            except:
+                raise Exception("Could not cast key as %s" % \
+                                id_field_type.__name__)
+
+        if not hasattr(self, "_key_object"):
+            self._key_object = self._document.objects.with_id(self.key)
+            return self._key_object
+        return self._key_object
+

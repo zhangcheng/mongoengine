@@ -20,6 +20,9 @@ Documents
 
 .. autoclass:: mongoengine.EmbeddedDocument
    :members:
+   
+.. autoclass:: mongoengine.document.MapReduceDocument
+  :members:
 
 Querying
 ========
