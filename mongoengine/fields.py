@@ -316,8 +316,9 @@ class SortedListField(ListField):
 
     _ordering = None
 
-    def __init__(self, field, ordering, **kwargs):
-        self._ordering = ordering
+    def __init__(self, field, **kwargs):
+        if 'ordering' in kwargs.keys():
+            self._ordering = kwargs.pop('ordering')
         super(SortedListField, self).__init__(field, **kwargs)
 
     def to_mongo(self, value):
