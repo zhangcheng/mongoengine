@@ -314,7 +314,7 @@ class SortedListField(ListField):
     retrieved.
     """
 
-    _ordering = 'order'
+    _ordering = None
 
     def __init__(self, field, ordering, **kwargs):
         self._ordering = ordering
@@ -323,7 +323,7 @@ class SortedListField(ListField):
     def to_mongo(self, value):
         if self._ordering is not None:
             return sorted([self.field.to_mongo(item) for item in value], key=itemgetter(self._ordering))
-        return super(SortedListField, self).to_mongo(value)
+        return sorted([self.field.to_mongo(item) for item in value])
 
 class DictField(BaseField):
     """A dictionary field that wraps a standard Python dictionary. This is
