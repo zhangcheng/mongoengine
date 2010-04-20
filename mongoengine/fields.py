@@ -13,7 +13,7 @@ __all__ = ['StringField', 'IntField', 'FloatField', 'BooleanField',
            'DateTimeField', 'EmbeddedDocumentField', 'ListField', 'DictField',
            'ObjectIdField', 'ReferenceField', 'ValidationError',
            'DecimalField', 'URLField', 'GenericReferenceField',
-           'BinaryField', 'SortedListField']
+           'BinaryField', 'SortedListField', 'EmailField', 'GeoLocationField']
 
 RECURSIVE_REFERENCE_CONSTANT = 'self'
 
@@ -22,9 +22,10 @@ class StringField(BaseField):
     """A unicode string field.
     """
 
-    def __init__(self, regex=None, max_length=None, **kwargs):
+    def __init__(self, regex=None, max_length=None, min_length=None, **kwargs):
         self.regex = re.compile(regex) if regex else None
         self.max_length = max_length
+        self.min_length = min_length
         super(StringField, self).__init__(**kwargs)
 
     def to_python(self, value):
@@ -35,6 +36,9 @@ class StringField(BaseField):
 
         if self.max_length is not None and len(value) > self.max_length:
             raise ValidationError('String value is too long')
+        
+        if self.min_length is not None and len(value) < self.min_length:
+            raise ValidationError('String value is too short')
 
         if self.regex is not None and self.regex.match(value) is None:
             message = 'String value did not match validation regex'
@@ -63,7 +67,7 @@ class StringField(BaseField):
 
 
 class URLField(StringField):
-    """A field that validates input as a URL.
+    """A field that validates input as an URL.
 
     .. versionadded:: 0.3
     """
@@ -94,6 +98,19 @@ class URLField(StringField):
                 message = 'This URL appears to be a broken link: %s' % e
                 raise ValidationError(message)
 
+class EmailField(StringField):
+    """A field that validates input as an E-Mail-Address.
+    """
+
+    EMAIL_REGEX = re.compile(
+        r"(^[-!#$%&'*+/=?^_`{}|~0-9A-Z]+(\.[-!#$%&'*+/=?^_`{}|~0-9A-Z]+)*"  # dot-atom
+        r'|^"([\001-\010\013\014\016-\037!#-\[\]-\177]|\\[\001-011\013\014\016-\177])*"' # quoted-string
+        r')@(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?$', re.IGNORECASE # domain
+    )
+    
+    def validate(self, value):
+        if not EmailField.EMAIL_REGEX.match(value):
+            raise ValidationError('Invalid Mail-address: %s' % value)
 
 class IntField(BaseField):
     """An integer field.
@@ -118,7 +135,6 @@ class IntField(BaseField):
         if self.max_value is not None and value > self.max_value:
             raise ValidationError('Integer value is too large')
 
-
 class FloatField(BaseField):
     """An floating point number field.
     """
@@ -140,7 +156,6 @@ class FloatField(BaseField):
 
         if self.max_value is not None and value > self.max_value:
             raise ValidationError('Float value is too large')
-
 
 class DecimalField(BaseField):
     """A fixed-point decimal number field.
@@ -175,7 +190,6 @@ class DecimalField(BaseField):
         if self.max_value is not None and value > self.max_value:
             raise ValidationError('Decimal value is too large')
 
-
 class BooleanField(BaseField):
     """A boolean field type.
 
@@ -188,14 +202,12 @@ class BooleanField(BaseField):
     def validate(self, value):
         assert isinstance(value, bool)
 
-
 class DateTimeField(BaseField):
     """A datetime field.
     """
 
     def validate(self, value):
         assert isinstance(value, datetime.datetime)
-
 
 class EmbeddedDocumentField(BaseField):
     """An embedded document field. Only valid values are subclasses of
@@ -350,6 +362,23 @@ class DictField(BaseField):
     def lookup_member(self, member_name):
         return BaseField(db_field=member_name)
 
+class GeoLocationField(DictField):
+    """Supports geobased fields"""
+    
+    def validate(self, value):
+        """Make sure that a geo-value is of type (x, y)
+        """
+        if not isinstance(value, tuple) and not isinstance(value, list):
+            raise ValidationError('GeoLocationField can only hold tuples or lists of (x, y)')
+        
+        if len(value) <> 2:
+            raise ValidationError('GeoLocationField must have exactly two elements (x, y)')
+    
+    def to_mongo(self, value):
+        return {'x': value[0], 'y': value[1]}
+    
+    def to_python(self, value):
+        return value.keys()
 
 class ReferenceField(BaseField):
     """A reference to a document that will be automatically dereferenced on
@@ -476,6 +505,7 @@ class BinaryField(BaseField):
         return pymongo.binary.Binary(value)
 
     def to_python(self, value):
+        # Returns str not unicode as this is binary data
         return str(value)
 
     def validate(self, value):

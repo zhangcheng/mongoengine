@@ -4,7 +4,6 @@ import pymongo
 import re
 import copy
 
-
 __all__ = ['queryset_manager', 'Q', 'InvalidQueryError',
            'InvalidCollectionError']
 
@@ -124,7 +123,7 @@ class Q(object):
 
         # Comparing two ObjectIds in Javascript doesn't work..
         if isinstance(value, pymongo.objectid.ObjectId):
-            value = str(value)
+            value = unicode(value)
 
         # Perform the substitution
         operation_js = op_js % {
@@ -229,7 +228,7 @@ class QuerySet(object):
         """
         if not self._accessed_collection:
             self._accessed_collection = True
-
+            
             # Ensure document-defined indexes are created
             if self._document._meta['indexes']:
                 for key_or_list in self._document._meta['indexes']:
@@ -243,6 +242,11 @@ class QuerySet(object):
             # If _types is being used (for polymorphism), it needs an index
             if '_types' in self._query:
                 self._collection.ensure_index('_types')
+            
+            # Ensure all needed field indexes are created
+            for field_name, field_instance in self._document._fields.iteritems():
+                if field_instance.__class__.__name__ == 'GeoLocationField':
+                    self._collection.ensure_index([(field_name, pymongo.GEO2D),])
         return self._collection_obj
 
     @property
@@ -298,7 +302,7 @@ class QuerySet(object):
         """Transform a query from Django-style format to Mongo format.
         """
         operators = ['ne', 'gt', 'gte', 'lt', 'lte', 'in', 'nin', 'mod',
-                     'all', 'size', 'exists']
+                     'all', 'size', 'exists', 'near']
         match_operators = ['contains', 'icontains', 'startswith', 
                            'istartswith', 'endswith', 'iendswith']
 
@@ -309,7 +313,7 @@ class QuerySet(object):
             op = None
             if parts[-1] in operators + match_operators:
                 op = parts.pop()
-
+            
             if _doc_cls:
                 # Switch field names to proper names [set in Field(name='foo')]
                 fields = QuerySet._lookup_field(_doc_cls, parts)
@@ -493,13 +497,13 @@ class QuerySet(object):
         map_f_scope = {}
         if isinstance(map_f, pymongo.code.Code):
             map_f_scope = map_f.scope
-            map_f = str(map_f)
+            map_f = unicode(map_f)
         map_f = pymongo.code.Code(self._sub_js_fields(map_f), map_f_scope)
 
         reduce_f_scope = {}
         if isinstance(reduce_f, pymongo.code.Code):
             reduce_f_scope = reduce_f.scope
-            reduce_f = str(reduce_f)
+            reduce_f = unicode(reduce_f)
         reduce_f_code = self._sub_js_fields(reduce_f)
         reduce_f = pymongo.code.Code(reduce_f_code, reduce_f_scope)
 
@@ -509,7 +513,7 @@ class QuerySet(object):
             finalize_f_scope = {}
             if isinstance(finalize_f, pymongo.code.Code):
                 finalize_f_scope = finalize_f.scope
-                finalize_f = str(finalize_f)
+                finalize_f = unicode(finalize_f)
             finalize_f_code = self._sub_js_fields(finalize_f)
             finalize_f = pymongo.code.Code(finalize_f_code, finalize_f_scope)
             mr_args['finalize'] = finalize_f
@@ -732,7 +736,7 @@ class QuerySet(object):
                 # Older versions of PyMongo don't support 'multi'
                 self._collection.update(self._query, update, safe=safe_update)
         except pymongo.errors.OperationFailure, e:
-            raise OperationError('Update failed [%s]' % str(e))
+            raise OperationError(u'Update failed [%s]' % unicode(e))
 
     def __iter__(self):
         return self
@@ -748,9 +752,9 @@ class QuerySet(object):
             field_name = match.group(1).split('.')
             fields = QuerySet._lookup_field(self._document, field_name)
             # Substitute the correct name for the field into the javascript
-            return '["%s"]' % fields[-1].db_field
+            return u'["%s"]' % fields[-1].db_field
 
-        return re.sub('\[\s*~([A-z_][A-z_0-9.]+?)\s*\]', field_sub, code)
+        return re.sub(u'\[\s*~([A-z_][A-z_0-9.]+?)\s*\]', field_sub, code)
 
     def exec_js(self, code, *fields, **options):
         """Execute a Javascript function on the server. A list of fields may be
@@ -914,7 +918,7 @@ class QuerySetManager(object):
                     opts = {'capped': True, 'size': max_size}
                     if max_documents:
                         opts['max'] = max_documents
-                    self._collection = db.create_collection(collection, opts)
+                    self._collection = db.create_collection(collection, **opts)
             else:
                 self._collection = db[collection]
 

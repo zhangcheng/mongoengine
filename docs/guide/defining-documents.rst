@@ -22,7 +22,7 @@ objects** as class attributes to the document class::
     
     class Page(Document):
         title = StringField(max_length=200, required=True)
-        date_modified = DateTimeField(default=datetime.now)
+        date_modified = DateTimeField(default=datetime.datetime.now)
 
 Fields
 ======
@@ -46,6 +46,40 @@ are as follows:
 * :class:`~mongoengine.EmbeddedDocumentField`
 * :class:`~mongoengine.ReferenceField`
 * :class:`~mongoengine.GenericReferenceField`
+
+Field arguments
+---------------
+Each field type can be customized by keyword arguments.  The following keyword 
+arguments can be set on all fields:
+
+:attr:`db_field` (Default: None)
+    The MongoDB field name.
+
+:attr:`name` (Default: None)
+    The mongoengine field name.
+
+:attr:`required` (Default: False)
+    If set to True and the field is not set on the document instance, a
+    :class:`~mongoengine.base.ValidationError` will be raised when the document is
+    validated.
+
+:attr:`default` (Default: None)
+    A value to use when no value is set for this field.
+
+:attr:`unique` (Default: False)
+    When True, no documents in the collection will have the same value for this
+    field.
+
+:attr:`unique_with` (Default: None)
+    A field name (or list of field names) that when taken together with this
+    field, will not have two documents in the collection with the same value.
+
+:attr:`primary_key` (Default: False)
+    When True, use this field as a primary key for the collection.
+
+:attr:`choices` (Default: None)
+    An iterable of choices to which the value of this field should be limited.
+    
 
 List fields
 -----------
@@ -178,7 +212,7 @@ either a single field name, or a list or tuple of field names::
     class User(Document):
         username = StringField(unique=True)
         first_name = StringField()
-        last_name = StringField(unique_with='last_name')
+        last_name = StringField(unique_with='first_name')
 
 Document collections
 ====================
