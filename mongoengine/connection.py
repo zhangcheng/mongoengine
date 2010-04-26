@@ -54,9 +54,11 @@ def connect(db, username=None, password=None, **kwargs):
     the default port on localhost. If authentication is needed, provide
     username and password arguments as well.
     """
-    global _connection_settings, _db_name, _db_username, _db_password
+    global _connection_settings, _db_name, _db_username, _db_password, _db
     _connection_settings.update(kwargs)
     _db_name = db
     _db_username = username
     _db_password = password
+    if _db is not None and _db != _db_name:
+        _db = None
     return _get_db()
