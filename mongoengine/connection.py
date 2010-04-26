@@ -62,3 +62,4 @@ def connect(db, username=None, password=None, **kwargs):
     if _db is not None and _db != _db_name:
         _db = None
     return _get_db()
+
