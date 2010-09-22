@@ -4,10 +4,11 @@ from pymongo import Connection
 __all__ = ['ConnectionError', 'connect']
 
 
-_connection_settings = {
+_connection_defaults = {
     'host': 'localhost',
     'port': 27017,
 }
+_connection_settings = _connection_defaults.copy()
 _connection = None
 
 _db_name = None
@@ -55,11 +56,12 @@ def connect(db, username=None, password=None, **kwargs):
     username and password arguments as well.
     """
     global _connection_settings, _db_name, _db_username, _db_password, _db
-    _connection_settings.update(kwargs)
+    _connection_settings = dict(_connection_defaults, **kwargs)
     _db_name = db
     _db_username = username
     _db_password = password
     if _db is not None and _db != _db_name:
         _db = None
+        _connection = None
     return _get_db()
 
