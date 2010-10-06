@@ -51,7 +51,7 @@ class StringField(BaseField):
         if not isinstance(op, basestring):
             return value
 
-        if op.lstrip('i') in ('startswith', 'endswith', 'contains'):
+        if op.lstrip('i') in ('startswith', 'endswith', 'contains', 'exact'):
             flags = 0
             if op.startswith('i'):
                 flags = re.IGNORECASE
@@ -62,6 +62,8 @@ class StringField(BaseField):
                 regex = r'^%s'
             elif op == 'endswith':
                 regex = r'%s$'
+            elif op == 'exact':
+                regex = r'^%s$'
             value = re.compile(regex % value, flags)
         return value
 
@@ -348,6 +350,11 @@ class DictField(BaseField):
     .. versionadded:: 0.3
     """
 
+    def __init__(self, basecls=None, *args, **kwargs):
+        self.basecls = basecls or BaseField
+        assert issubclass(self.basecls, BaseField)
+        super(DictField, self).__init__(*args, **kwargs)
+
     def validate(self, value):
         """Make sure that a list of valid fields is being used.
         """
@@ -360,7 +367,7 @@ class DictField(BaseField):
                                   'contain "." or "$" characters')
 
     def lookup_member(self, member_name):
-        return BaseField(db_field=member_name)
+        return self.basecls(db_field=member_name)
 
 class GeoLocationField(DictField):
     """Supports geobased fields"""

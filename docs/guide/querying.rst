@@ -63,7 +63,7 @@ operator name to a key with a double-underscore::
 
 Available operators are as follows:
 
-* ``neq`` -- not equal to
+* ``ne`` -- not equal to
 * ``lt`` -- less than
 * ``lte`` -- less than or equal to
 * ``gt`` -- greater than
@@ -78,6 +78,8 @@ Available operators are as follows:
 The following operators are available as shortcuts to querying with regular
 expressions:
 
+* ``exact`` -- string field exactly matches value
+* ``iexact`` -- string field exactly matches value (case insensitive)
 * ``contains`` -- string field contains value
 * ``icontains`` -- string field contains value (case insensitive)
 * ``startswith`` -- string field starts with value
@@ -172,7 +174,7 @@ custom manager methods as you like::
 
         @queryset_manager
         def live_posts(doc_cls, queryset):
-            return queryset.filter(published=True)
+            return queryset(published=True).filter(published=True)
 
     BlogPost(title='test1', published=False).save()
     BlogPost(title='test2', published=True).save()

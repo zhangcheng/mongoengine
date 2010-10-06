@@ -265,6 +265,30 @@ class QuerySetTest(unittest.TestCase):
         obj = self.Person.objects(Q(name__iendswith='rossuM')).first()
         self.assertEqual(obj, person)
 
+        # Test exact
+        obj = self.Person.objects(name__exact='Guido van Rossum').first()
+        self.assertEqual(obj, person)
+        obj = self.Person.objects(name__exact='Guido van rossum').first()
+        self.assertEqual(obj, None)
+        obj = self.Person.objects(name__exact='Guido van Rossu').first()
+        self.assertEqual(obj, None)
+        obj = self.Person.objects(Q(name__exact='Guido van Rossum')).first()
+        self.assertEqual(obj, person)
+        obj = self.Person.objects(Q(name__exact='Guido van rossum')).first()
+        self.assertEqual(obj, None)
+        obj = self.Person.objects(Q(name__exact='Guido van Rossu')).first()
+        self.assertEqual(obj, None)
+
+        # Test iexact
+        obj = self.Person.objects(name__iexact='gUIDO VAN rOSSUM').first()
+        self.assertEqual(obj, person)
+        obj = self.Person.objects(name__iexact='gUIDO VAN rOSSU').first()
+        self.assertEqual(obj, None)
+        obj = self.Person.objects(Q(name__iexact='gUIDO VAN rOSSUM')).first()
+        self.assertEqual(obj, person)
+        obj = self.Person.objects(Q(name__iexact='gUIDO VAN rOSSU')).first()
+        self.assertEqual(obj, None)
+
     def test_filter_chaining(self):
         """Ensure filters can be chained together.
         """
@@ -478,6 +502,22 @@ class QuerySetTest(unittest.TestCase):
         self.assertEqual(obj, person)
         obj = self.Person.objects(Q(name__ne=re.compile('^Gui'))).first()
         self.assertEqual(obj, None)
+
+    def test_q_lists(self):
+        """Ensure that Q objects query ListFields correctly.
+        """
+        class BlogPost(Document):
+            tags = ListField(StringField())
+
+        BlogPost.drop_collection()
+
+        BlogPost(tags=['python', 'mongo']).save()
+        BlogPost(tags=['python']).save()
+
+        self.assertEqual(len(BlogPost.objects(Q(tags='mongo'))), 1)
+        self.assertEqual(len(BlogPost.objects(Q(tags='python'))), 2)
+
+        BlogPost.drop_collection()
 
     def test_exec_js_query(self):
         """Ensure that queries are properly formed for use in exec_js.
@@ -1063,6 +1103,29 @@ class QuerySetTest(unittest.TestCase):
 
         BlogPost.drop_collection()
 
+    def test_dict_with_custom_baseclass(self):
+        """Ensure DictField working with custom base clases.
+        """
+        class Test(Document):
+            testdict = DictField()
+
+        t = Test(testdict={'f': 'Value'})
+        t.save()
+
+        self.assertEqual(len(Test.objects(testdict__f__startswith='Val')), 0)
+        self.assertEqual(len(Test.objects(testdict__f='Value')), 1)
+        Test.drop_collection()
+
+        class Test(Document):
+            testdict = DictField(basecls=StringField)
+
+        t = Test(testdict={'f': 'Value'})
+        t.save()
+
+        self.assertEqual(len(Test.objects(testdict__f='Value')), 1)
+        self.assertEqual(len(Test.objects(testdict__f__startswith='Val')), 1)
+        Test.drop_collection()
+
     def test_bulk(self):
         """Ensure bulk querying by object id returns a proper dict.
         """
@@ -1125,16 +1188,36 @@ class QTest(unittest.TestCase):
         """
         q = Q()
         examples = [
-            ({'name': 'test'}, 'this.name == i0f0', {'i0f0': 'test'}),
+            
+            ({'name': 'test'}, ('((this.name instanceof Array) &&   '
+             'this.name.indexOf(i0f0) != -1) || this.name == i0f0'), 
+             {'i0f0': 'test'}),
             ({'age': {'$gt': 18}}, 'this.age > i0f0o0', {'i0f0o0': 18}),
             ({'name': 'test', 'age': {'$gt': 18, '$lte': 65}},
-             'this.age <= i0f0o0 && this.age > i0f0o1 && this.name == i0f1',
+              ('this.age <= i0f0o0 && this.age > i0f0o1 && '
+               '((this.name instanceof Array) &&   '
+               'this.name.indexOf(i0f1) != -1) || this.name == i0f1'),
              {'i0f0o0': 65, 'i0f0o1': 18, 'i0f1': 'test'}),
         ]
         for item, js, scope in examples:
             test_scope = {}
             self.assertEqual(q._item_query_as_js(item, test_scope, 0), js)
             self.assertEqual(scope, test_scope)
+
+    def test_empty_q(self):
+        """Ensure that empty Q objects won't hurt.
+        """
+        q1 = Q()
+        q2 = Q(age__gte=18)
+        q3 = Q()
+        q4 = Q(name='test')
+        q5 = Q()
+
+        query = ['(', {'age__gte': 18}, '||', {'name': 'test'}, ')']
+        self.assertEqual((q1 | q2 | q3 | q4 | q5).query, query)
+
+        query = ['(', {'age__gte': 18}, '&&', {'name': 'test'}, ')']
+        self.assertEqual((q1 & q2 & q3 & q4 & q5).query, query)
 
 if __name__ == '__main__':
     unittest.main()

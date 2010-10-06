@@ -36,7 +36,9 @@ class Q(object):
     OR = '||'
     AND = '&&'
     OPERATORS = {
-        'eq': 'this.%(field)s == %(value)s',
+        'eq': ('((this.%(field)s instanceof Array) && '
+               '  this.%(field)s.indexOf(%(value)s) != -1) ||'
+               ' this.%(field)s == %(value)s'),
         'ne': 'this.%(field)s != %(value)s',
         'gt': 'this.%(field)s > %(value)s',
         'gte': 'this.%(field)s >= %(value)s',
@@ -59,8 +61,13 @@ class Q(object):
 
     def _combine(self, other, op):
         obj = Q()
-        obj.query = ['('] + copy.deepcopy(self.query) + [op]
-        obj.query += copy.deepcopy(other.query) + [')']
+        if not other.query[0]:
+            return self
+        if self.query[0]:
+            obj.query = (['('] + copy.deepcopy(self.query) + [op] +
+                         copy.deepcopy(other.query) + [')'])
+        else:
+            obj.query = copy.deepcopy(other.query)
         return obj
 
     def __or__(self, other):
@@ -107,11 +114,13 @@ class Q(object):
                 value, field_js = self._build_op_js(op, key, value, value_name)
                 js_scope[value_name] = value
                 js.append(field_js)
+        print ' && '.join(js)
         return ' && '.join(js)
 
     def _build_op_js(self, op, key, value, value_name):
         """Substitute the values in to the correct chunk of Javascript.
         """
+        print op, key, value, value_name
         if isinstance(value, RE_TYPE):
             # Regexes are handled specially
             if op.strip('$') == 'ne':
@@ -303,8 +312,9 @@ class QuerySet(object):
         """
         operators = ['ne', 'gt', 'gte', 'lt', 'lte', 'in', 'nin', 'mod',
                      'all', 'size', 'exists', 'near']
-        match_operators = ['contains', 'icontains', 'startswith', 
-                           'istartswith', 'endswith', 'iendswith']
+        match_operators = ['contains', 'icontains', 'startswith',
+                           'istartswith', 'endswith', 'iendswith',
+                           'exact', 'iexact']
 
         mongo_query = {}
         for key, value in query.items():
@@ -313,7 +323,7 @@ class QuerySet(object):
             op = None
             if parts[-1] in operators + match_operators:
                 op = parts.pop()
-            
+
             if _doc_cls:
                 # Switch field names to proper names [set in Field(name='foo')]
                 fields = QuerySet._lookup_field(_doc_cls, parts)
