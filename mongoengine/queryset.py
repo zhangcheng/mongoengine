@@ -893,7 +893,7 @@ class QuerySetManager(object):
 
     def __init__(self, manager_func=None):
         self._manager_func = manager_func
-        self._collection = None
+        self._collections = {}
 
     def __get__(self, instance, owner):
         """Descriptor for instantiating a new QuerySet object when
@@ -903,8 +903,8 @@ class QuerySetManager(object):
             # Document class being used rather than a document object
             return self
 
-        if self._collection is None:
-            db = _get_db()
+        db = _get_db()
+        if db not in self._collections:
             collection = owner._meta['collection']
 
             # Create collection as a capped collection if specified
@@ -914,10 +914,10 @@ class QuerySetManager(object):
                 max_documents = owner._meta['max_documents']
 
                 if collection in db.collection_names():
-                    self._collection = db[collection]
+                    self._collections[db] = db[collection]
                     # The collection already exists, check if its capped
                     # options match the specified capped options
-                    options = self._collection.options()
+                    options = self._collections[db].options()
                     if options.get('max') != max_documents or \
                        options.get('size') != max_size:
                         msg = ('Cannot create collection "%s" as a capped '
@@ -928,12 +928,14 @@ class QuerySetManager(object):
                     opts = {'capped': True, 'size': max_size}
                     if max_documents:
                         opts['max'] = max_documents
-                    self._collection = db.create_collection(collection, **opts)
+                    self._collections[db] = db.create_collection(
+                        collection, **opts
+                    )
             else:
-                self._collection = db[collection]
+                self._collections[db] = db[collection]
 
         # owner is the document that contains the QuerySetManager
-        queryset = QuerySet(owner, self._collection)
+        queryset = QuerySet(owner, self._collections[db])
         if self._manager_func:
             if self._manager_func.func_code.co_argcount == 1:
                 queryset = self._manager_func(queryset)
