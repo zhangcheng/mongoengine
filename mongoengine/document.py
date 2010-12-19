@@ -137,9 +137,6 @@ class Document(BaseDocument):
                 dynamic_fields_list = self._data['_dynamic_fields_list']
             dynamic_fields_list.append(field_name)
             self._data['_dynamic_fields_list'] = dynamic_fields_list
-        else:
-            message = u'Field %s already exists' % field_name
-            raise OperationError(message)
 
 class MapReduceDocument(object):
     """A document returned from a map/reduce query.
