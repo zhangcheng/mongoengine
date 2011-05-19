@@ -9,6 +9,7 @@ _connection_defaults = {
     'host': 'localhost',
     'port': 27017,
 }
+
 _connection = {}
 _connection_settings = _connection_defaults.copy()
 

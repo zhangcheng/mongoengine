@@ -1,5 +1,5 @@
 from base import (DocumentMetaclass, TopLevelDocumentMetaclass, BaseDocument,
-                  ValidationError)
+                  ValidationError, BaseField)
 from queryset import OperationError
 from connection import _get_db
 
@@ -72,6 +72,11 @@ class Document(BaseDocument):
         if validate:
             self.validate()
         doc = self.to_mongo()
+        # Also check for any dynamic fields that were set and write them to the
+        # database as well.
+        for field_name, field in self._dynamic_fields.items():
+            if field_name in self._data.keys():
+                doc[field_name] = self._data[field_name]
         try:
             collection = self.__class__.objects._collection
             if force_insert:
@@ -126,6 +131,20 @@ class Document(BaseDocument):
         db = _get_db()
         db.drop_collection(cls._meta['collection'])
 
+    def create_dynamic_field(self, field_name, field_value=None):
+        """Creates a new dynamic field on the object.
+        """
+        if not self._dynamic_fields.has_key(field_name) and not self._fields.has_key(field_name):
+            self._dynamic_fields[field_name] = BaseField(name=field_name)
+            self._data[field_name] = field_value
+
+            if not '_dynamic_fields_list' in self._dynamic_fields.keys():
+                self._dynamic_fields['_dynamic_fields_list'] = BaseField(name='_dynamic_fields_list')
+                dynamic_fields_list = ['_dynamic_fields_list']
+            else:
+                dynamic_fields_list = self._data['_dynamic_fields_list']
+            dynamic_fields_list.append(field_name)
+            self._data['_dynamic_fields_list'] = dynamic_fields_list
 
 class MapReduceDocument(object):
     """A document returned from a map/reduce query.
@@ -165,3 +184,4 @@ class MapReduceDocument(object):
             self._key_object = self._document.objects.with_id(self.key)
             return self._key_object
         return self._key_object
+

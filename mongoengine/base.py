@@ -347,9 +347,14 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
 
 class BaseDocument(object):
 
-    def __init__(self, **values):
+    def __init__(self, dynamic_fields_list=None, **values):
         self._data = {}
-        # Assign default values to instance
+        self._dynamic_fields = {}
+        # Assign initial values to instance
+        if dynamic_fields_list is not None:
+            for field_name in dynamic_fields_list:
+                self._fields[field_name] = BaseField(name=field_name)
+                self._data[field_name] = values[field_name]
         for attr_name in self._fields.keys():
             # Use default value if present
             value = getattr(self, attr_name, None)
@@ -491,14 +496,20 @@ class BaseDocument(object):
             cls = subclasses[class_name]
 
         present_fields = data.keys()
-
         for field_name, field in cls._fields.items():
             if field.db_field in data:
                 value = data[field.db_field]
                 data[field_name] = (value if value is None
                                     else field.to_python(value))
 
-        obj = cls(**data)
+        if '_dynamic_fields_list' in data:
+            dynamic_fields_list = data['_dynamic_fields_list']
+            for field_name in dynamic_fields_list:
+                data[field_name] = field.to_python(data[field_name])
+        else:
+            dynamic_fields_list = None
+
+        obj = cls(dynamic_fields_list, **data)
         obj._present_fields = present_fields
         return obj
 
