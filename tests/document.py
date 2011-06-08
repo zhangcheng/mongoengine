@@ -504,6 +504,27 @@ class DocumentTest(unittest.TestCase):
         except ValidationError:
             fail()
 
+    def test_update(self):
+        """Ensure that an existing document may be updated instead of be overwritten.
+        """
+        # Create person object and save it to the database
+        person = self.Person(name='Test User', age=30)
+        person.save()
+        # Ensure that the object is in the database
+        collection = self.db[self.Person._meta['collection']]
+        person_obj = collection.find_one({'name': 'Test User'})
+        self.assertEqual(person_obj['name'], 'Test User')
+        self.assertEqual(person_obj['age'], 30)
+        self.assertEqual(person_obj['_id'], person.id)
+        # Create same person object, with same id, without age
+        same_person = self.Person(name='Test User')
+        same_person.id = person.id
+        same_person.save()
+        person_obj = collection.find_one({'name': 'Test User'})
+        # Make sure age attribute doesn't get overwritten
+        self.assertTrue(person_obj.has_key('age'))
+        self.assertEqual(person_obj['age'], 30)
+
     def test_delete(self):
         """Ensure that document may be deleted using the delete method.
         """

@@ -76,6 +76,9 @@ class Document(BaseDocument):
             collection = self.__class__.objects._collection
             if force_insert:
                 object_id = collection.insert(doc, safe=safe)
+            elif doc.has_key('_id'):
+                object_id = doc.pop('_id')
+                collection.update({'_id': object_id}, {"$set": doc}, upsert=True, safe=safe)
             else:
                 object_id = collection.save(doc, safe=safe)
         except pymongo.errors.OperationFailure, err:
