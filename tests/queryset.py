@@ -770,6 +770,26 @@ class QuerySetTest(unittest.TestCase):
         ages = [p.age for p in self.Person.objects.order_by('-name')]
         self.assertEqual(ages, [30, 40, 20])
 
+    def test_order_by_in_django_template(self):
+        """Ensure that QuerySets are properly ordered in Django template.
+        """
+        self.Person(name="A", age=20).save()
+        self.Person(name="B", age=40).save()
+        self.Person(name="D", age=10).save()
+        self.Person(name="C", age=30).save()
+        from django.conf import settings
+        settings.configure()
+        from django.template import Context, Template
+        t = Template("{% for o in ol %}{{ o.name }}{{ o.age }}{% endfor %}")
+        d = {"ol": self.Person.objects.order_by('-name')}
+        self.assertEqual(t.render(Context(d)), u'A20B40C30D10')
+        d = {"ol": self.Person.objects.order_by('+name')}
+        self.assertEqual(t.render(Context(d)), u'D10C30B40A20')
+        d = {"ol": self.Person.objects.order_by('-age')}
+        self.assertEqual(t.render(Context(d)), u'B40C30A20D10')
+        d = {"ol": self.Person.objects.order_by('+age')}
+        self.assertEqual(t.render(Context(d)), u'D10A20C30B40')
+
     def test_map_reduce(self):
         """Ensure map/reduce is both mapping and reducing.
         """
