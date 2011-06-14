@@ -1,11 +1,10 @@
 from mongoengine import signals
 from base import (DocumentMetaclass, TopLevelDocumentMetaclass, BaseDocument,
-                  ValidationError)
+                  ValidationError, BaseDict, BaseList)
 from queryset import OperationError
 from connection import _get_db
 
 import pymongo
-
 
 __all__ = ['Document', 'EmbeddedDocument', 'ValidationError', 'OperationError']
 
@@ -18,6 +17,18 @@ class EmbeddedDocument(BaseDocument):
     """
 
     __metaclass__ = DocumentMetaclass
+
+    def __delattr__(self, *args, **kwargs):
+        """Handle deletions of fields"""
+        field_name = args[0]
+        if field_name in self._fields:
+            default = self._fields[field_name].default
+            if callable(default):
+                default = default()
+            setattr(self, field_name, default)
+        else:
+            super(EmbeddedDocument, self).__delattr__(*args, **kwargs)
+
 
 
 class Document(BaseDocument):
@@ -59,7 +70,6 @@ class Document(BaseDocument):
     disabled by either setting types to False on the specific index or
     by setting index_types to False on the meta dictionary for the document.
     """
-
     __metaclass__ = TopLevelDocumentMetaclass
 
     def save(self, safe=True, force_insert=False, validate=True, write_options=None):
@@ -81,7 +91,7 @@ class Document(BaseDocument):
                 For example, ``save(..., w=2, fsync=True)`` will wait until at least two servers
                 have recorded the write and will force an fsync on each server being written to.
         """
-        signals.pre_save.send(self)
+        signals.pre_save.send(self.__class__, document=self)
 
         if validate:
             self.validate()
@@ -95,18 +105,15 @@ class Document(BaseDocument):
             collection = self.__class__.objects._collection
             if force_insert:
                 object_id = collection.insert(doc, safe=safe, **write_options)
-            elif '_id' in doc:
-                # Perform a set rather than a save - this will only save set fields
-                object_id = doc.pop('_id')
-                collection.update({'_id': object_id}, {"$set": doc}, upsert=True, safe=safe, **write_options)
-
-                # Find and unset any fields explicitly set to None
-                if hasattr(self, '_present_fields'):
-                    removals = dict([(k, 1) for k in self._present_fields if k not in doc and k != '_id'])
-                    if removals:
-                        collection.update({'_id': object_id}, {"$unset": removals}, upsert=True, safe=safe, **write_options)
-            else:
+            if created:
                 object_id = collection.save(doc, safe=safe, **write_options)
+            else:
+                object_id = doc['_id']
+                updates, removals = self._delta()
+                if updates:
+                    collection.update({'_id': object_id}, {"$set": updates}, upsert=True, safe=safe, **write_options)
+                if removals:
+                    collection.update({'_id': object_id}, {"$unset": removals}, upsert=True, safe=safe, **write_options)
         except pymongo.errors.OperationFailure, err:
             message = 'Could not save document (%s)'
             if u'duplicate key' in unicode(err):
@@ -114,8 +121,8 @@ class Document(BaseDocument):
             raise OperationError(message % unicode(err))
         id_field = self._meta['id_field']
         self[id_field] = self._fields[id_field].to_python(object_id)
-
-        signals.post_save.send(self, created=created)
+        self._changed_fields = []
+        signals.post_save.send(self.__class__, document=self, created=created)
 
     def delete(self, safe=False):
         """Delete the :class:`~mongoengine.Document` from the database. This
@@ -123,7 +130,7 @@ class Document(BaseDocument):
 
         :param safe: check if the operation succeeded before returning
         """
-        signals.pre_delete.send(self)
+        signals.pre_delete.send(self.__class__, document=self)
 
         id_field = self._meta['id_field']
         object_id = self._fields[id_field].to_mongo(self[id_field])
@@ -133,15 +140,7 @@ class Document(BaseDocument):
             message = u'Could not delete document (%s)' % err.message
             raise OperationError(message)
 
-        signals.post_delete.send(self)
-
-    @classmethod
-    def register_delete_rule(cls, document_cls, field_name, rule):
-        """This method registers the delete rules to apply when removing this
-        object.
-        """
-        cls._meta['delete_rules'][(document_cls, field_name)] = rule
-
+        signals.post_delete.send(self.__class__, document=self)
 
     def reload(self):
         """Reloads all attributes from the database.
@@ -151,7 +150,29 @@ class Document(BaseDocument):
         id_field = self._meta['id_field']
         obj = self.__class__.objects(**{id_field: self[id_field]}).first()
         for field in self._fields:
-            setattr(self, field, obj[field])
+            setattr(self, field, self._reload(field, obj[field]))
+        self._changed_fields = []
+
+    def _reload(self, key, value):
+        """Used by :meth:`~mongoengine.Document.reload` to ensure the
+        correct instance is linked to self.
+        """
+        if isinstance(value, BaseDict):
+            value = [(k, self._reload(k,v)) for k,v in value.items()]
+            value = BaseDict(value, instance=self, name=key)
+        elif isinstance(value, BaseList):
+            value = [self._reload(key, v) for v in value]
+            value = BaseList(value, instance=self, name=key)
+        elif isinstance(value, EmbeddedDocument):
+            value._changed_fields = []
+        return value
+
+    @classmethod
+    def register_delete_rule(cls, document_cls, field_name, rule):
+        """This method registers the delete rules to apply when removing this
+        object.
+        """
+        cls._meta['delete_rules'][(document_cls, field_name)] = rule
 
     @classmethod
     def drop_collection(cls):
