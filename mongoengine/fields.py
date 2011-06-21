@@ -252,7 +252,7 @@ class DateTimeField(BaseField):
             return datetime.datetime(value.year, value.month, value.day)
 
         # Attempt to parse a datetime:
-        #value = smart_str(value)
+        # value = smart_str(value)
         # split usecs, because they are not recognized by strptime.
         if '.' in value:
             try:
@@ -276,6 +276,7 @@ class DateTimeField(BaseField):
                                              **kwargs)
                 except ValueError:
                     return None
+
 
 
 class ComplexDateTimeField(StringField):
@@ -526,6 +527,7 @@ class MapField(DictField):
         super(MapField, self).__init__(field=field, *args, **kwargs)
 
 
+
 class ReferenceField(BaseField):
     """A reference to a document that will be automatically dereferenced on
     access (lazily).
@@ -595,7 +597,7 @@ class ReferenceField(BaseField):
             id_ = document
 
         id_ = id_field.to_mongo(id_)
-        collection = self.document_type._meta['collection']
+        collection = self.document_type._get_collection_name()
         return pymongo.dbref.DBRef(collection, id_)
 
     def prepare_query_value(self, op, value):
@@ -603,6 +605,11 @@ class ReferenceField(BaseField):
 
     def validate(self, value):
         assert isinstance(value, (self.document_type, pymongo.dbref.DBRef))
+
+        if isinstance(value, Document) and value.id is None:
+            raise ValidationError('You can only reference documents once '
+                                  'they have been saved to the database')
+
 
     def lookup_member(self, member_name):
         return self.document_type._fields.get(member_name)
@@ -628,6 +635,15 @@ class GenericReferenceField(BaseField):
 
         return super(GenericReferenceField, self).__get__(instance, owner)
 
+    def validate(self, value):
+        if not isinstance(value, (Document, pymongo.dbref.DBRef)):
+            raise ValidationError('GenericReferences can only contain documents')
+
+        # We need the id from the saved object to create the DBRef
+        if isinstance(value, Document) and value.id is None:
+            raise ValidationError('You can only reference documents once '
+                                  'they have been saved to the database')
+
     def dereference(self, value):
         doc_cls = get_document(value['_cls'])
         reference = value['_ref']
@@ -650,9 +666,9 @@ class GenericReferenceField(BaseField):
             id_ = document
 
         id_ = id_field.to_mongo(id_)
-        collection = document._meta['collection']
+        collection = document._get_collection_name()
         ref = pymongo.dbref.DBRef(collection, id_)
-        return {'_cls': document.__class__.__name__, '_ref': ref}
+        return {'_cls': document._class_name, '_ref': ref}
 
     def prepare_query_value(self, op, value):
         return self.to_mongo(value)

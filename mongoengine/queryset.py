@@ -11,7 +11,7 @@ import itertools
 import operator
 
 __all__ = ['queryset_manager', 'Q', 'InvalidQueryError',
-           'InvalidCollectionError', 'DO_NOTHING', 'NULLIFY', 'CASCADE', 'DENY']
+           'DO_NOTHING', 'NULLIFY', 'CASCADE', 'DENY']
 
 
 # The maximum number of items to display in a QuerySet.__repr__
@@ -37,10 +37,6 @@ class InvalidQueryError(Exception):
 
 
 class OperationError(Exception):
-    pass
-
-
-class InvalidCollectionError(Exception):
     pass
 
 
@@ -251,7 +247,8 @@ class QCombination(QNode):
 
     def accept(self, visitor):
         for i in range(len(self.children)):
-            self.children[i] = self.children[i].accept(visitor)
+            if isinstance(self.children[i], QNode):
+                self.children[i] = self.children[i].accept(visitor)
 
         return visitor.visit_combination(self)
 
@@ -346,6 +343,7 @@ class QuerySet(object):
         self._cursor_obj = None
         self._limit = None
         self._skip = None
+        self._hint = -1  # Using -1 as None is a valid value for hint
 
     def clone(self):
         """Creates a copy of the current :class:`~mongoengine.queryset.QuerySet`"""
@@ -353,7 +351,7 @@ class QuerySet(object):
 
         copy_props = ('_initial_query', '_query_obj', '_where_clause',
                     '_loaded_fields', '_ordering', '_snapshot',
-                    '_timeout', '_limit', '_skip', '_slave_okay')
+                    '_timeout', '_limit', '_skip', '_slave_okay', '_hint')
 
         for prop in copy_props:
             val = getattr(self, prop)
@@ -496,12 +494,11 @@ class QuerySet(object):
                 self._collection.ensure_index('_types',
                     background=background, **index_opts)
 
-            # Ensure all needed field indexes are created
-            for field in self._document._fields.values():
-                if field.__class__._geo_index:
-                    index_spec = [(field.db_field, pymongo.GEO2D)]
-                    self._collection.ensure_index(index_spec,
-                        background=background, **index_opts)
+            # Add geo indicies
+            for field in self._document._geo_indices():
+                index_spec = [(field.db_field, pymongo.GEO2D)]
+                self._collection.ensure_index(index_spec,
+                    background=background, **index_opts)
 
         return self._collection_obj
 
@@ -537,6 +534,9 @@ class QuerySet(object):
 
             if self._skip is not None:
                 self._cursor_obj.skip(self._skip)
+
+            if self._hint != -1:
+                self._cursor_obj.hint(self._hint)
 
         return self._cursor_obj
 
@@ -964,6 +964,21 @@ class QuerySet(object):
         self._skip = n
         return self
 
+    def hint(self, index=None):
+        """Added 'hint' support, telling Mongo the proper index to use for the
+        query.
+
+        Judicious use of hints can greatly improve query performance. When doing
+        a query on multiple fields (at least one of which is indexed) pass the
+        indexed field as a hint to the query.
+
+        Hinting will not do anything if the corresponding index does not exist.
+        The last hint applied to this cursor takes precedence over all others.
+        """
+        self._cursor.hint(index)
+        self._hint = index
+        return self
+
     def __getitem__(self, key):
         """Support skip and limit using getitem and slicing syntax.
         """
@@ -1303,7 +1318,16 @@ class QuerySet(object):
             # Substitute the correct name for the field into the javascript
             return u'["%s"]' % fields[-1].db_field
 
-        return re.sub(u'\[\s*~([A-z_][A-z_0-9.]+?)\s*\]', field_sub, code)
+        def field_path_sub(match):
+            # Extract just the field name, and look up the field objects
+            field_name = match.group(1).split('.')
+            fields = QuerySet._lookup_field(self._document, field_name)
+            # Substitute the correct name for the field into the javascript
+            return ".".join([f.db_field for f in fields])
+
+        code = re.sub(u'\[\s*~([A-z_][A-z_0-9.]+?)\s*\]', field_sub, code)
+        code = re.sub(u'\{\{\s*~([A-z_][A-z_0-9.]+?)\s*\}\}', field_path_sub, code)
+        return code
 
     def exec_js(self, code, *fields, **options):
         """Execute a Javascript function on the server. A list of fields may be
@@ -1331,7 +1355,7 @@ class QuerySet(object):
 
         fields = [QuerySet._translate_field_name(self._document, f)
                   for f in fields]
-        collection = self._document._meta['collection']
+        collection = self._document._get_collection_name()
 
         scope = {
             'collection': collection,
@@ -1391,6 +1415,12 @@ class QuerySet(object):
         the whole queried set of documents, and their corresponding frequency.
         This is useful for generating tag clouds, or searching documents.
 
+        .. note::
+            Can only do direct simple mappings and cannot map across
+            :class:`~mongoengine.ReferenceField` or
+            :class:`~mongoengine.GenericReferenceField` for more complex
+            counting a manual map reduce call would is required.
+
         If the field is a :class:`~mongoengine.ListField`, the items within
         each list will be counted individually.
 
@@ -1405,12 +1435,15 @@ class QuerySet(object):
     def _item_frequencies_map_reduce(self, field, normalize=False):
         map_func = """
             function() {
-                if (this[~%(field)s].constructor == Array) {
-                    this[~%(field)s].forEach(function(item) {
+                path = '{{~%(field)s}}'.split('.');
+                field = this;
+                for (p in path) { field = field[path[p]]; }
+                if (field.constructor == Array) {
+                    field.forEach(function(item) {
                         emit(item, 1);
                     });
                 } else {
-                    emit(this[~%(field)s], 1);
+                    emit(field, 1);
                 }
             }
         """ % dict(field=field)
@@ -1443,12 +1476,16 @@ class QuerySet(object):
     def _item_frequencies_exec_js(self, field, normalize=False):
         """Uses exec_js to execute"""
         freq_func = """
-            function(field) {
+            function(path) {
+                path = path.split('.');
+
                 if (options.normalize) {
                     var total = 0.0;
                     db[collection].find(query).forEach(function(doc) {
-                        if (doc[field].constructor == Array) {
-                            total += doc[field].length;
+                        field = doc;
+                        for (p in path) { field = field[path[p]]; }
+                        if (field.constructor == Array) {
+                            total += field.length;
                         } else {
                             total++;
                         }
@@ -1461,25 +1498,31 @@ class QuerySet(object):
                     inc /= total;
                 }
                 db[collection].find(query).forEach(function(doc) {
-                    if (doc[field].constructor == Array) {
-                        doc[field].forEach(function(item) {
+                    field = doc;
+                    for (p in path) { field = field[path[p]]; }
+                    if (field.constructor == Array) {
+                        field.forEach(function(item) {
                             frequencies[item] = inc + (isNaN(frequencies[item]) ? 0: frequencies[item]);
                         });
                     } else {
-                        var item = doc[field];
+                        var item = field;
                         frequencies[item] = inc + (isNaN(frequencies[item]) ? 0: frequencies[item]);
                     }
                 });
                 return frequencies;
             }
         """
+
         return self.exec_js(freq_func, field, normalize=normalize)
 
     def __repr__(self):
         limit = REPR_OUTPUT_SIZE + 1
         if self._limit is not None and self._limit < limit:
             limit = self._limit
-        data = list(self[self._skip:limit])
+        try:
+            data = list(self[self._skip:limit])
+        except pymongo.errors.InvalidOperation:
+            return ".. queryset mid-iteration .."
         if len(data) > REPR_OUTPUT_SIZE:
             data[-1] = "...(remaining elements truncated)..."
         return repr(data)
@@ -1502,39 +1545,9 @@ class QuerySetManager(object):
             # Document class being used rather than a document object
             return self
 
-        db = _get_db()
-        collection = owner._meta['collection']
-        if (db, collection) not in self._collections:
-            # Create collection as a capped collection if specified
-            if owner._meta['max_size'] or owner._meta['max_documents']:
-                # Get max document limit and max byte size from meta
-                max_size = owner._meta['max_size'] or 10000000  # 10MB default
-                max_documents = owner._meta['max_documents']
-
-                if collection in db.collection_names():
-                    self._collections[(db, collection)] = db[collection]
-                    # The collection already exists, check if its capped
-                    # options match the specified capped options
-                    options = self._collections[(db, collection)].options()
-                    if options.get('max') != max_documents or \
-                       options.get('size') != max_size:
-                        msg = ('Cannot create collection "%s" as a capped '
-                               'collection as it already exists') % collection
-                        raise InvalidCollectionError(msg)
-                else:
-                    # Create the collection as a capped collection
-                    opts = {'capped': True, 'size': max_size}
-                    if max_documents:
-                        opts['max'] = max_documents
-                    self._collections[(db, collection)] = db.create_collection(
-                        collection, **opts
-                    )
-            else:
-                self._collections[(db, collection)] = db[collection]
-
         # owner is the document that contains the QuerySetManager
         queryset_class = owner._meta['queryset_class'] or QuerySet
-        queryset = queryset_class(owner, self._collections[(db, collection)])
+        queryset = queryset_class(owner, owner._get_collection())
         if self.get_queryset:
             if self.get_queryset.func_code.co_argcount == 1:
                 queryset = self.get_queryset(queryset)

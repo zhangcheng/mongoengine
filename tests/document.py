@@ -1,23 +1,19 @@
+import pickle
+import pymongo
 import unittest
+import warnings
+
 from datetime import datetime
+
 import pymongo
 import pickle
 import weakref
 
+from fixtures import Base, Mixin, PickleEmbedded, PickleTest
+
 from mongoengine import *
 from mongoengine.base import BaseField
 from mongoengine.connection import _get_db
-
-
-class PickleEmbedded(EmbeddedDocument):
-    date = DateTimeField(default=datetime.now)
-
-
-class PickleTest(Document):
-    number = IntField()
-    string = StringField()
-    embedded = EmbeddedDocumentField(PickleEmbedded)
-    lists = ListField(StringField())
 
 
 class DocumentTest(unittest.TestCase):
@@ -39,7 +35,7 @@ class DocumentTest(unittest.TestCase):
         """
         self.Person(name='Test').save()
 
-        collection = self.Person._meta['collection']
+        collection = self.Person._get_collection_name()
         self.assertTrue(collection in self.db.collection_names())
 
         self.Person.drop_collection()
@@ -65,6 +61,73 @@ class DocumentTest(unittest.TestCase):
         self.assertTrue('name' in fields and 'age' in fields)
         # Ensure Document isn't treated like an actual document
         self.assertFalse(hasattr(Document, '_fields'))
+
+    def test_collection_name(self):
+        """Ensure that a collection with a specified name may be used.
+        """
+
+        class DefaultNamingTest(Document):
+            pass
+        self.assertEquals('default_naming_test', DefaultNamingTest._get_collection_name())
+
+        class CustomNamingTest(Document):
+            meta = {'collection': 'pimp_my_collection'}
+
+        self.assertEquals('pimp_my_collection', CustomNamingTest._get_collection_name())
+
+        class DynamicNamingTest(Document):
+            meta = {'collection': lambda c: "DYNAMO"}
+        self.assertEquals('DYNAMO', DynamicNamingTest._get_collection_name())
+
+        # Use Abstract class to handle backwards compatibility
+        class BaseDocument(Document):
+            meta = {
+                'abstract': True,
+                'collection': lambda c: c.__name__.lower()
+            }
+
+        class OldNamingConvention(BaseDocument):
+            pass
+        self.assertEquals('oldnamingconvention', OldNamingConvention._get_collection_name())
+
+        class InheritedAbstractNamingTest(BaseDocument):
+            meta = {'collection': 'wibble'}
+        self.assertEquals('wibble', InheritedAbstractNamingTest._get_collection_name())
+
+        with warnings.catch_warnings(record=True) as w:
+            # Cause all warnings to always be triggered.
+            warnings.simplefilter("always")
+
+            class NonAbstractBase(Document):
+                pass
+
+            class InheritedDocumentFailTest(NonAbstractBase):
+                meta = {'collection': 'fail'}
+
+            self.assertTrue(issubclass(w[0].category, SyntaxWarning))
+            self.assertEquals('non_abstract_base', InheritedDocumentFailTest._get_collection_name())
+
+        # Mixin tests
+        class BaseMixin(object):
+            meta = {
+                'collection': lambda c: c.__name__.lower()
+            }
+
+        class OldMixinNamingConvention(Document, BaseMixin):
+            pass
+        self.assertEquals('oldmixinnamingconvention', OldMixinNamingConvention._get_collection_name())
+
+        class BaseMixin(object):
+            meta = {
+                'collection': lambda c: c.__name__.lower()
+            }
+
+        class BaseDocument(Document, BaseMixin):
+            pass
+
+        class MyDocument(BaseDocument):
+            pass
+        self.assertEquals('mydocument', OldMixinNamingConvention._get_collection_name())
 
     def test_get_superclasses(self):
         """Ensure that the correct list of superclasses is assembled.
@@ -108,6 +171,51 @@ class DocumentTest(unittest.TestCase):
         }
         self.assertEqual(Animal._get_subclasses(), animal_subclasses)
 
+    def test_external_super_and_sub_classes(self):
+        """Ensure that the correct list of sub and super classes is assembled.
+        when importing part of the model
+        """
+        class Animal(Base): pass
+        class Fish(Animal): pass
+        class Mammal(Animal): pass
+        class Human(Mammal): pass
+        class Dog(Mammal): pass
+
+        mammal_superclasses = {'Base': Base, 'Base.Animal': Animal}
+        self.assertEqual(Mammal._superclasses, mammal_superclasses)
+
+        dog_superclasses = {
+            'Base': Base,
+            'Base.Animal': Animal,
+            'Base.Animal.Mammal': Mammal,
+        }
+        self.assertEqual(Dog._superclasses, dog_superclasses)
+
+        animal_subclasses = {
+            'Base.Animal.Fish': Fish,
+            'Base.Animal.Mammal': Mammal,
+            'Base.Animal.Mammal.Dog': Dog,
+            'Base.Animal.Mammal.Human': Human
+        }
+        self.assertEqual(Animal._get_subclasses(), animal_subclasses)
+
+        mammal_subclasses = {
+            'Base.Animal.Mammal.Dog': Dog,
+            'Base.Animal.Mammal.Human': Human
+        }
+        self.assertEqual(Mammal._get_subclasses(), mammal_subclasses)
+
+        Base.drop_collection()
+
+        h = Human()
+        h.save()
+
+        self.assertEquals(Human.objects.count(), 1)
+        self.assertEquals(Mammal.objects.count(), 1)
+        self.assertEquals(Animal.objects.count(), 1)
+        self.assertEquals(Base.objects.count(), 1)
+        Base.drop_collection()
+
     def test_polymorphic_queries(self):
         """Ensure that the correct subclasses are returned from a query"""
         class Animal(Document): pass
@@ -115,6 +223,8 @@ class DocumentTest(unittest.TestCase):
         class Mammal(Animal): pass
         class Human(Mammal): pass
         class Dog(Mammal): pass
+
+        Animal.drop_collection()
 
         Animal().save()
         Fish().save()
@@ -133,6 +243,52 @@ class DocumentTest(unittest.TestCase):
 
         Animal.drop_collection()
 
+    def test_polymorphic_references(self):
+        """Ensure that the correct subclasses are returned from a query when
+        using references / generic references
+        """
+        class Animal(Document): pass
+        class Fish(Animal): pass
+        class Mammal(Animal): pass
+        class Human(Mammal): pass
+        class Dog(Mammal): pass
+
+        class Zoo(Document):
+            animals = ListField(ReferenceField(Animal))
+
+        Zoo.drop_collection()
+        Animal.drop_collection()
+
+        Animal().save()
+        Fish().save()
+        Mammal().save()
+        Human().save()
+        Dog().save()
+
+        # Save a reference to each animal
+        zoo = Zoo(animals=Animal.objects)
+        zoo.save()
+        zoo.reload()
+
+        classes = [a.__class__ for a in Zoo.objects.first().animals]
+        self.assertEqual(classes, [Animal, Fish, Mammal, Human, Dog])
+
+        Zoo.drop_collection()
+
+        class Zoo(Document):
+            animals = ListField(GenericReferenceField(Animal))
+
+        # Save a reference to each animal
+        zoo = Zoo(animals=Animal.objects)
+        zoo.save()
+        zoo.reload()
+
+        classes = [a.__class__ for a in Zoo.objects.first().animals]
+        self.assertEqual(classes, [Animal, Fish, Mammal, Human, Dog])
+
+        Zoo.drop_collection()
+        Animal.drop_collection()
+
     def test_inheritance(self):
         """Ensure that document may inherit fields from a superclass document.
         """
@@ -141,8 +297,8 @@ class DocumentTest(unittest.TestCase):
 
         self.assertTrue('name' in Employee._fields)
         self.assertTrue('salary' in Employee._fields)
-        self.assertEqual(Employee._meta['collection'],
-                         self.Person._meta['collection'])
+        self.assertEqual(Employee._get_collection_name(),
+                         self.Person._get_collection_name())
 
         # Ensure that MRO error is not raised
         class A(Document): pass
@@ -167,7 +323,7 @@ class DocumentTest(unittest.TestCase):
         # Check that _cls etc aren't present on simple documents
         dog = Animal(name='dog')
         dog.save()
-        collection = self.db[Animal._meta['collection']]
+        collection = self.db[Animal._get_collection_name()]
         obj = collection.find_one()
         self.assertFalse('_cls' in obj)
         self.assertFalse('_types' in obj)
@@ -213,7 +369,7 @@ class DocumentTest(unittest.TestCase):
         # Check that _cls etc aren't present on simple documents
         dog = Animal(name='dog')
         dog.save()
-        collection = self.db[Animal._meta['collection']]
+        collection = self.db[Animal._get_collection_name()]
         obj = collection.find_one()
         self.assertFalse('_cls' in obj)
         self.assertFalse('_types' in obj)
@@ -234,7 +390,7 @@ class DocumentTest(unittest.TestCase):
         dog = Animal(name='dog')
         dog.save()
 
-        collection = self.db[Animal._meta['collection']]
+        collection = self.db[Animal._get_collection_name()]
         obj = collection.find_one()
         self.assertTrue('_cls' in obj)
         self.assertTrue('_types' in obj)
@@ -297,9 +453,12 @@ class DocumentTest(unittest.TestCase):
         self.assertFalse('collection' in Animal._meta)
         self.assertFalse('collection' in Mammal._meta)
 
-        self.assertEqual(Fish._meta['collection'], 'fish')
-        self.assertEqual(Guppy._meta['collection'], 'fish')
-        self.assertEqual(Human._meta['collection'], 'human')
+        self.assertEqual(Animal._get_collection_name(), None)
+        self.assertEqual(Mammal._get_collection_name(), None)
+
+        self.assertEqual(Fish._get_collection_name(), 'fish')
+        self.assertEqual(Guppy._get_collection_name(), 'fish')
+        self.assertEqual(Human._get_collection_name(), 'human')
 
         def create_bad_abstract():
             class EvilHuman(Human):
@@ -350,14 +509,21 @@ class DocumentTest(unittest.TestCase):
     def test_inherited_collections(self):
         """Ensure that subclassed documents don't override parents' collections.
         """
-        class Drink(Document):
-            name = StringField()
+        with warnings.catch_warnings(record=True) as w:
+            # Cause all warnings to always be triggered.
+            warnings.simplefilter("always")
 
-        class AlcoholicDrink(Drink):
-            meta = {'collection': 'booze'}
+            class Drink(Document):
+                name = StringField()
 
-        class Drinker(Document):
-            drink = GenericReferenceField()
+            class AlcoholicDrink(Drink):
+                meta = {'collection': 'booze'}
+
+            class Drinker(Document):
+                drink = GenericReferenceField()
+
+            # Confirm we triggered a SyntaxWarning
+            assert issubclass(w[0].category, SyntaxWarning)
 
         Drink.drop_collection()
         AlcoholicDrink.drop_collection()
@@ -371,7 +537,6 @@ class DocumentTest(unittest.TestCase):
 
         beer = AlcoholicDrink(name='Beer')
         beer.save()
-
         real_person = Drinker(drink=beer)
         real_person.save()
 
@@ -465,7 +630,6 @@ class DocumentTest(unittest.TestCase):
 
         BlogPost.drop_collection()
 
-
     def test_dictionary_indexes(self):
         """Ensure that indexes are used when meta[indexes] contains dictionaries
         instead of lists.
@@ -498,6 +662,35 @@ class DocumentTest(unittest.TestCase):
 
         BlogPost.drop_collection()
 
+    def test_hint(self):
+
+        class BlogPost(Document):
+            tags = ListField(StringField())
+            meta = {
+                'indexes': [
+                    'tags',
+                ],
+            }
+
+        BlogPost.drop_collection()
+
+        for i in xrange(0, 10):
+            tags = [("tag %i" % n) for n in xrange(0, i % 2)]
+            BlogPost(tags=tags).save()
+
+        self.assertEquals(BlogPost.objects.count(), 10)
+        self.assertEquals(BlogPost.objects.hint().count(), 10)
+        self.assertEquals(BlogPost.objects.hint([('tags', 1)]).count(), 10)
+
+        self.assertEquals(BlogPost.objects.hint([('ZZ', 1)]).count(), 10)
+
+        def invalid_index():
+            BlogPost.objects.hint('tags')
+        self.assertRaises(TypeError, invalid_index)
+
+        def invalid_index_2():
+            return BlogPost.objects.hint(('tags', 1))
+        self.assertRaises(TypeError, invalid_index_2)
 
     def test_unique(self):
         """Ensure that uniqueness constraints are applied to fields.
@@ -701,6 +894,14 @@ class DocumentTest(unittest.TestCase):
         self.assertEqual(person.name, "Test User")
         self.assertEqual(person.age, 30)
 
+    def test_to_dbref(self):
+        """Ensure that you can get a dbref of a document"""
+        person = self.Person(name="Test User", age=30)
+        self.assertRaises(OperationError, person.to_dbref)
+        person.save()
+
+        person.to_dbref()
+
     def test_reload(self):
         """Ensure that attributes may be reloaded.
         """
@@ -816,7 +1017,7 @@ class DocumentTest(unittest.TestCase):
         person = self.Person(name='Test User', age=30)
         person.save()
         # Ensure that the object is in the database
-        collection = self.db[self.Person._meta['collection']]
+        collection = self.db[self.Person._get_collection_name()]
         person_obj = collection.find_one({'name': 'Test User'})
         self.assertEqual(person_obj['name'], 'Test User')
         self.assertEqual(person_obj['age'], 30)
@@ -933,31 +1134,35 @@ class DocumentTest(unittest.TestCase):
         self.assertEquals(doc._delta(), ({}, {}))
 
         doc.string_field = 'hello'
+        self.assertEquals(doc._get_changed_fields(), ['string_field'])
         self.assertEquals(doc._delta(), ({'string_field': 'hello'}, {}))
 
         doc._changed_fields = []
         doc.int_field = 1
+        self.assertEquals(doc._get_changed_fields(), ['int_field'])
         self.assertEquals(doc._delta(), ({'int_field': 1}, {}))
 
         doc._changed_fields = []
         dict_value = {'hello': 'world', 'ping': 'pong'}
         doc.dict_field = dict_value
+        self.assertEquals(doc._get_changed_fields(), ['dict_field'])
         self.assertEquals(doc._delta(), ({'dict_field': dict_value}, {}))
 
         doc._changed_fields = []
         list_value = ['1', 2, {'hello': 'world'}]
         doc.list_field = list_value
+        self.assertEquals(doc._get_changed_fields(), ['list_field'])
         self.assertEquals(doc._delta(), ({'list_field': list_value}, {}))
 
         # Test unsetting
         doc._changed_fields = []
-        doc._unset_fields = []
         doc.dict_field = {}
+        self.assertEquals(doc._get_changed_fields(), ['dict_field'])
         self.assertEquals(doc._delta(), ({}, {'dict_field': 1}))
 
         doc._changed_fields = []
-        doc._unset_fields = {}
         doc.list_field = []
+        self.assertEquals(doc._get_changed_fields(), ['list_field'])
         self.assertEquals(doc._delta(), ({}, {'list_field': 1}))
 
     def test_delta_recursive(self):
@@ -990,6 +1195,8 @@ class DocumentTest(unittest.TestCase):
         embedded_1.list_field = ['1', 2, {'hello': 'world'}]
         doc.embedded_field = embedded_1
 
+        self.assertEquals(doc._get_changed_fields(), ['embedded_field'])
+
         embedded_delta = {
             '_types': ['Embedded'],
             '_cls': 'Embedded',
@@ -1005,6 +1212,7 @@ class DocumentTest(unittest.TestCase):
         doc.reload()
 
         doc.embedded_field.dict_field = {}
+        self.assertEquals(doc._get_changed_fields(), ['embedded_field.dict_field'])
         self.assertEquals(doc.embedded_field._delta(), ({}, {'dict_field': 1}))
         self.assertEquals(doc._delta(), ({}, {'embedded_field.dict_field': 1}))
         doc.save()
@@ -1012,6 +1220,7 @@ class DocumentTest(unittest.TestCase):
         self.assertEquals(doc.embedded_field.dict_field, {})
 
         doc.embedded_field.list_field = []
+        self.assertEquals(doc._get_changed_fields(), ['embedded_field.list_field'])
         self.assertEquals(doc.embedded_field._delta(), ({}, {'list_field': 1}))
         self.assertEquals(doc._delta(), ({}, {'embedded_field.list_field': 1}))
         doc.save()
@@ -1025,6 +1234,7 @@ class DocumentTest(unittest.TestCase):
         embedded_2.list_field = ['1', 2, {'hello': 'world'}]
 
         doc.embedded_field.list_field = ['1', 2, embedded_2]
+        self.assertEquals(doc._get_changed_fields(), ['embedded_field.list_field'])
         self.assertEquals(doc.embedded_field._delta(), ({
             'list_field': ['1', 2, {
                 '_cls': 'Embedded',
@@ -1055,11 +1265,37 @@ class DocumentTest(unittest.TestCase):
             self.assertEquals(doc.embedded_field.list_field[2][k], embedded_2[k])
 
         doc.embedded_field.list_field[2].string_field = 'world'
+        self.assertEquals(doc._get_changed_fields(), ['embedded_field.list_field.2.string_field'])
         self.assertEquals(doc.embedded_field._delta(), ({'list_field.2.string_field': 'world'}, {}))
         self.assertEquals(doc._delta(), ({'embedded_field.list_field.2.string_field': 'world'}, {}))
         doc.save()
         doc.reload()
         self.assertEquals(doc.embedded_field.list_field[2].string_field, 'world')
+
+        # Test multiple assignments
+        doc.embedded_field.list_field[2].string_field = 'hello world'
+        doc.embedded_field.list_field[2] = doc.embedded_field.list_field[2]
+        self.assertEquals(doc._get_changed_fields(), ['embedded_field.list_field'])
+        self.assertEquals(doc.embedded_field._delta(), ({
+            'list_field': ['1', 2, {
+            '_types': ['Embedded'],
+            '_cls': 'Embedded',
+            'string_field': 'hello world',
+            'int_field': 1,
+            'list_field': ['1', 2, {'hello': 'world'}],
+            'dict_field': {'hello': 'world'}}]}, {}))
+        self.assertEquals(doc._delta(), ({
+            'embedded_field.list_field': ['1', 2, {
+                '_types': ['Embedded'],
+                '_cls': 'Embedded',
+                'string_field': 'hello world',
+                'int_field': 1,
+                'list_field': ['1', 2, {'hello': 'world'}],
+                'dict_field': {'hello': 'world'}}
+            ]}, {}))
+        doc.save()
+        doc.reload()
+        self.assertEquals(doc.embedded_field.list_field[2].string_field, 'hello world')
 
         # Test list native methods
         doc.embedded_field.list_field[2].list_field.pop(0)
@@ -1124,7 +1360,7 @@ class DocumentTest(unittest.TestCase):
                              id='497ce96f395f2f052a494fd4')
         person.save()
         # Ensure that the object is in the database with the correct _id
-        collection = self.db[self.Person._meta['collection']]
+        collection = self.db[self.Person._get_collection_name()]
         person_obj = collection.find_one({'name': 'Test User'})
         self.assertEqual(str(person_obj['_id']), '497ce96f395f2f052a494fd4')
 
@@ -1136,7 +1372,7 @@ class DocumentTest(unittest.TestCase):
                              pk='497ce96f395f2f052a494fd4')
         person.save()
         # Ensure that the object is in the database with the correct _id
-        collection = self.db[self.Person._meta['collection']]
+        collection = self.db[self.Person._get_collection_name()]
         person_obj = collection.find_one({'name': 'Test User'})
         self.assertEqual(str(person_obj['_id']), '497ce96f395f2f052a494fd4')
 
@@ -1159,7 +1395,7 @@ class DocumentTest(unittest.TestCase):
         post.comments = comments
         post.save()
 
-        collection = self.db[BlogPost._meta['collection']]
+        collection = self.db[BlogPost._get_collection_name()]
         post_obj = collection.find_one()
         self.assertEqual(post_obj['tags'], tags)
         for comment_obj, comment in zip(post_obj['comments'], comments):
@@ -1184,7 +1420,7 @@ class DocumentTest(unittest.TestCase):
         employee.save()
 
         # Ensure that the object is in the database
-        collection = self.db[self.Person._meta['collection']]
+        collection = self.db[self.Person._get_collection_name()]
         employee_obj = collection.find_one({'name': 'Test Employee'})
         self.assertEqual(employee_obj['name'], 'Test Employee')
         self.assertEqual(employee_obj['age'], 50)
@@ -1215,6 +1451,7 @@ class DocumentTest(unittest.TestCase):
         promoted_employee.reload()
         self.assertEqual(promoted_employee.name, 'Test Employee')
         self.assertEqual(promoted_employee.age, 50)
+
         # Ensure that the 'details' embedded object saved correctly
         self.assertEqual(promoted_employee.details.position, 'Senior Developer')
 
@@ -1225,6 +1462,36 @@ class DocumentTest(unittest.TestCase):
         promoted_employee.reload()
         self.assertEqual(promoted_employee.details, None)
 
+    def test_mixins_dont_add_to_types(self):
+
+        class Bob(Document): name = StringField()
+
+        Bob.drop_collection()
+
+        p = Bob(name="Rozza")
+        p.save()
+        Bob.drop_collection()
+
+        class Person(Document, Mixin):
+            pass
+
+        Person.drop_collection()
+
+        p = Person(name="Rozza")
+        p.save()
+        self.assertEquals(p._fields.keys(), ['name', 'id'])
+
+        collection = self.db[Person._get_collection_name()]
+        obj = collection.find_one()
+        self.assertEquals(obj['_cls'], 'Person')
+        self.assertEquals(obj['_types'], ['Person'])
+
+
+
+        self.assertEquals(Person.objects.count(), 1)
+        rozza = Person.objects.get(name="Rozza")
+
+        Person.drop_collection()
 
     def test_save_reference(self):
         """Ensure that a document reference field may be saved in the database.
@@ -1307,6 +1574,9 @@ class DocumentTest(unittest.TestCase):
             text = StringField()
             post = ReferenceField(BlogPost, reverse_delete_rule=CASCADE)
 
+        self.Person.drop_collection()
+        BlogPost.drop_collection()
+        Comment.drop_collection()
 
         author = self.Person(name='Test User')
         author.save()
@@ -1433,7 +1703,7 @@ class DocumentTest(unittest.TestCase):
 
     def test_picklable(self):
 
-        pickle_doc = PickleTest(number=1, string="OH HAI", lists=['1', '2'])
+        pickle_doc = PickleTest(number=1, string="One", lists=['1', '2'])
         pickle_doc.embedded = PickleEmbedded()
         pickle_doc.save()
 
@@ -1442,7 +1712,7 @@ class DocumentTest(unittest.TestCase):
 
         self.assertEquals(resurrected, pickle_doc)
 
-        resurrected.string = "Working"
+        resurrected.string = "Two"
         resurrected.save()
 
         pickle_doc.reload()

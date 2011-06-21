@@ -22,14 +22,22 @@ class ValidationError(Exception):
 
 _document_registry = {}
 
+
 def get_document(name):
-    if name not in _document_registry:
+    doc = _document_registry.get(name, None)
+    if not doc:
+        # Possible old style names
+        end = ".%s" % name
+        possible_match = [k for k in _document_registry.keys() if k.endswith(end)]
+        if len(possible_match) == 1:
+            doc = _document_registry.get(possible_match.pop(), None)
+    if not doc:
         raise NotRegistered("""
             `%s` has not been registered in the document registry.
             Importing the document class automatically registers it, has it
             been imported?
         """.strip() % name)
-    return _document_registry[name]
+    return doc
 
 
 class BaseField(object):
@@ -49,7 +57,7 @@ class BaseField(object):
 
     def __init__(self, db_field=None, name=None, required=False, default=None,
                  unique=False, unique_with=None, primary_key=False,
-                 validation=None, choices=None):
+                 validation=None, choices=None, verbose_name=None, help_text=None):
         self.db_field = (db_field or name) if not primary_key else '_id'
         if name:
             import warnings
@@ -63,6 +71,8 @@ class BaseField(object):
         self.primary_key = primary_key
         self.validation = validation
         self.choices = choices
+        self.verbose_name = verbose_name
+        self.help_text = help_text
 
         # Adjust the appropriate creation counter, and save our local copy.
         if self.db_field == '_id':
@@ -171,7 +181,7 @@ class ComplexBaseField(BaseField):
 
         for k,v in value_list.items():
             if isinstance(v, dict) and '_cls' in v and '_ref' not in v:
-                value_list[k] = get_document(v['_cls'].split('.')[-1])._from_son(v)
+                value_list[k] = get_document(v['_cls'])._from_son(v)
 
         # Handle all dereferencing
         db = _get_db()
@@ -186,7 +196,7 @@ class ComplexBaseField(BaseField):
             elif isinstance(v, (dict, pymongo.son.SON)):
                 if '_ref' in v:
                     # generic reference
-                    collection = get_document(v['_cls'])._meta['collection']
+                    collection = get_document(v['_cls'])._get_collection_name()
                     collections.setdefault(collection, []).append((k,v))
                 else:
                     # Use BaseDict so can watch any changes
@@ -248,7 +258,7 @@ class ComplexBaseField(BaseField):
                     if v.pk is None:
                         raise ValidationError('You can only reference documents once '
                                       'they have been saved to the database')
-                    collection = v._meta['collection']
+                    collection = v._get_collection_name()
                     value_dict[k] = pymongo.dbref.DBRef(collection, v.pk)
                 elif hasattr(v, 'to_python'):
                     value_dict[k] = v.to_python()
@@ -297,7 +307,7 @@ class ComplexBaseField(BaseField):
                         from fields import GenericReferenceField
                         value_dict[k] = GenericReferenceField().to_mongo(v)
                     else:
-                        collection = v._meta['collection']
+                        collection = v._get_collection_name()
                         value_dict[k] = pymongo.dbref.DBRef(collection, v.pk)
                 elif hasattr(v, 'to_mongo'):
                     value_dict[k] = v.to_mongo()
@@ -380,6 +390,7 @@ class DocumentMetaclass(type):
         class_name = [name]
         superclasses = {}
         simple_class = True
+
         for base in bases:
             # Include all fields present in superclasses
             if hasattr(base, '_fields'):
@@ -388,6 +399,9 @@ class DocumentMetaclass(type):
                 # Get superclasses from superclass
                 superclasses[base._class_name] = base
                 superclasses.update(base._superclasses)
+            else:  # Add any mixin fields
+                attrs.update(dict([(k,v) for k,v in base.__dict__.items()
+                                    if issubclass(v.__class__, BaseField)]))
 
             if hasattr(base, '_meta') and not base._meta.get('abstract'):
                 # Ensure that the Document class may be subclassed -
@@ -399,6 +413,7 @@ class DocumentMetaclass(type):
                 else:
                     simple_class = False
 
+        doc_class_name = '.'.join(reversed(class_name))
         meta = attrs.get('_meta', attrs.get('meta', {}))
 
         if 'allow_inheritance' not in meta:
@@ -410,8 +425,7 @@ class DocumentMetaclass(type):
             raise ValueError('Only direct subclasses of Document may set '
                              '"allow_inheritance" to False')
         attrs['_meta'] = meta
-
-        attrs['_class_name'] = '.'.join(reversed(class_name))
+        attrs['_class_name'] = doc_class_name
         attrs['_superclasses'] = superclasses
 
         # Add the document's fields to the _fields attribute
@@ -446,7 +460,7 @@ class DocumentMetaclass(type):
         new_class.add_to_class('MultipleObjectsReturned', exc)
 
         global _document_registry
-        _document_registry[name] = new_class
+        _document_registry[doc_class_name] = new_class
 
         return new_class
 
@@ -478,7 +492,7 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
                 raise ValueError("Abstract document cannot have non-abstract base")
             return super_new(cls, name, bases, attrs)
 
-        collection = name.lower()
+        collection = ''.join('_%s' % c if c.isupper() else c for c in name).strip('_').lower()
 
         id_field = None
         base_indexes = []
@@ -487,9 +501,14 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
         # Subclassed documents inherit collection from superclass
         for base in bases:
             if hasattr(base, '_meta'):
-                if 'collection' in base._meta:
-                    collection = base._meta['collection']
 
+                if 'collection' in attrs.get('meta', {}) and not base._meta.get('abstract', False):
+                    import warnings
+                    msg = "Trying to set a collection on a subclass (%s)" % name
+                    warnings.warn(msg, SyntaxWarning)
+                    del(attrs['meta']['collection'])
+                if base._get_collection_name():
+                    collection = base._get_collection_name()
                 # Propagate index options.
                 for key in ('index_background', 'index_drop_dups', 'index_opts'):
                     if key in base._meta:
@@ -525,6 +544,10 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
         # Set up collection manager, needs the class to have fields so use
         # DocumentMetaclass before instantiating CollectionManager object
         new_class = super_new(cls, name, bases, attrs)
+
+        collection = attrs['_meta'].get('collection', None)
+        if callable(collection):
+            new_class._meta['collection'] = collection(new_class)
 
         # Provide a default queryset unless one has been manually provided
         manager = attrs.get('objects', QuerySetManager())
@@ -605,9 +628,6 @@ class BaseDocument(object):
         self._data = {}
         # Assign default values to instance
         for attr_name, field in self._fields.items():
-            if field.choices:  # dynamically adds a way to get the display value for a field with choices
-                setattr(self, 'get_%s_display' % attr_name, partial(self._get_FIELD_display, field=field))
-
             value = getattr(self, attr_name, None)
             setattr(self, attr_name, value)
 
@@ -619,12 +639,10 @@ class BaseDocument(object):
             except AttributeError:
                 pass
 
-        signals.post_init.send(self.__class__, document=self)
+        # Set any get_fieldname_display methods
+        self.__set_field_display()
 
-    def _get_FIELD_display(self, field):
-        """Returns the display value for a choice field"""
-        value = getattr(self, field.name)
-        return dict(field.choices).get(value, value)
+        signals.post_init.send(self.__class__, document=self)
 
     def validate(self):
         """Ensure that all fields' values are valid and that required fields
@@ -645,21 +663,6 @@ class BaseDocument(object):
             elif field.required:
                 raise ValidationError('Field "%s" is required' % field.name)
 
-    @classmethod
-    def _get_subclasses(cls):
-        """Return a dictionary of all subclasses (found recursively).
-        """
-        try:
-            subclasses = cls.__subclasses__()
-        except:
-            subclasses = cls.__subclasses__(cls)
-
-        all_subclasses = {}
-        for subclass in subclasses:
-            all_subclasses[subclass._class_name] = subclass
-            all_subclasses.update(subclass._get_subclasses())
-        return all_subclasses
-
     @apply
     def pk():
         """Primary key alias
@@ -669,49 +672,6 @@ class BaseDocument(object):
         def fset(self, value):
             return setattr(self, self._meta['id_field'], value)
         return property(fget, fset)
-
-    def __iter__(self):
-        return iter(self._fields)
-
-    def __getitem__(self, name):
-        """Dictionary-style field access, return a field's value if present.
-        """
-        try:
-            if name in self._fields:
-                return getattr(self, name)
-        except AttributeError:
-            pass
-        raise KeyError(name)
-
-    def __setitem__(self, name, value):
-        """Dictionary-style field access, set a field's value.
-        """
-        # Ensure that the field exists before settings its value
-        if name not in self._fields:
-            raise KeyError(name)
-        return setattr(self, name, value)
-
-    def __contains__(self, name):
-        try:
-            val = getattr(self, name)
-            return val is not None
-        except AttributeError:
-            return False
-
-    def __len__(self):
-        return len(self._data)
-
-    def __repr__(self):
-        try:
-            u = unicode(self)
-        except (UnicodeEncodeError, UnicodeDecodeError):
-            u = '[Bad Unicode data]'
-        return u'<%s: %s>' % (self.__class__.__name__, u)
-
-    def __str__(self):
-        if hasattr(self, '__unicode__'):
-            return unicode(self).encode('utf-8')
-        return '%s object' % self.__class__.__name__
 
     def to_mongo(self):
         """Return data dictionary ready for use with MongoDB.
@@ -729,6 +689,27 @@ class BaseDocument(object):
         if '_id' in data and data['_id'] is None:
             del data['_id']
         return data
+
+    @classmethod
+    def _get_collection_name(cls):
+        """Returns the collection name for this class.
+        """
+        return cls._meta.get('collection', None)
+
+    @classmethod
+    def _get_subclasses(cls):
+        """Return a dictionary of all subclasses (found recursively).
+        """
+        try:
+            subclasses = cls.__subclasses__()
+        except:
+            subclasses = cls.__subclasses__(cls)
+
+        all_subclasses = {}
+        for subclass in subclasses:
+            all_subclasses[subclass._class_name] = subclass
+            all_subclasses.update(subclass._get_subclasses())
+        return all_subclasses
 
     @classmethod
     def _from_son(cls, son):
@@ -784,9 +765,9 @@ class BaseDocument(object):
         for field_name in self._fields:
             key = '%s.' % field_name
             field = getattr(self, field_name, None)
-            if isinstance(field, EmbeddedDocument):  # Grab all embedded fields that have been changed
+            if isinstance(field, EmbeddedDocument) and field_name not in _changed_fields:  # Grab all embedded fields that have been changed
                 _changed_fields += ["%s%s" % (key, k) for k in field._get_changed_fields(key) if k]
-            elif isinstance(field, (list, tuple)):  # Loop list fields as they contain documents
+            elif isinstance(field, (list, tuple)) and field_name not in _changed_fields:  # Loop list fields as they contain documents
                 for index, value in enumerate(field):
                     if not hasattr(value, '_get_changed_fields'):
                         continue
@@ -828,6 +809,81 @@ class BaseDocument(object):
                 unset_data[k] = 1
         return set_data, unset_data
 
+    @classmethod
+    def _geo_indices(cls):
+        geo_indices = []
+        for field in cls._fields.values():
+            if hasattr(field, 'document_type'):
+                geo_indices += field.document_type._geo_indices()
+            elif field._geo_index:
+                geo_indices.append(field)
+        return geo_indices
+
+    def __getstate__(self):
+        self_dict = self.__dict__
+        removals = ["get_%s_display" % k for k,v in self._fields.items() if v.choices]
+        for k in removals:
+            if hasattr(self, k):
+                delattr(self, k)
+        return self.__dict__
+
+    def __setstate__(self, __dict__):
+        self.__dict__ = __dict__
+        self.__set_field_display()
+
+    def __set_field_display(self):
+        for attr_name, field in self._fields.items():
+            if field.choices:  # dynamically adds a way to get the display value for a field with choices
+                setattr(self, 'get_%s_display' % attr_name, partial(self.__get_field_display, field=field))
+
+    def __get_field_display(self, field):
+        """Returns the display value for a choice field"""
+        value = getattr(self, field.name)
+        return dict(field.choices).get(value, value)
+
+    def __iter__(self):
+        return iter(self._fields)
+
+    def __getitem__(self, name):
+        """Dictionary-style field access, return a field's value if present.
+        """
+        try:
+            if name in self._fields:
+                return getattr(self, name)
+        except AttributeError:
+            pass
+        raise KeyError(name)
+
+    def __setitem__(self, name, value):
+        """Dictionary-style field access, set a field's value.
+        """
+        # Ensure that the field exists before settings its value
+        if name not in self._fields:
+            raise KeyError(name)
+        return setattr(self, name, value)
+
+    def __contains__(self, name):
+        try:
+            val = getattr(self, name)
+            return val is not None
+        except AttributeError:
+            return False
+
+    def __len__(self):
+        return len(self._data)
+
+    def __repr__(self):
+        try:
+            u = unicode(self)
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            u = '[Bad Unicode data]'
+        return u'<%s: %s>' % (self.__class__.__name__, u)
+
+    def __str__(self):
+        if hasattr(self, '__unicode__'):
+            return unicode(self).encode('utf-8')
+        return '%s object' % self.__class__.__name__
+
     def __eq__(self, other):
         if isinstance(other, self.__class__) and hasattr(other, 'id'):
             if self.id == other.id:
@@ -856,41 +912,45 @@ class BaseList(list):
         super(BaseList, self).__init__(list_items)
 
     def __setitem__(self, *args, **kwargs):
-        if hasattr(self, 'instance') and hasattr(self, 'name'):
-            self.instance._mark_as_changed(self.name)
-        super(BaseDict, self).__setitem__(*args, **kwargs)
+        self._mark_as_changed()
+        super(BaseList, self).__setitem__(*args, **kwargs)
 
     def __delitem__(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         super(BaseList, self).__delitem__(*args, **kwargs)
 
     def append(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         return super(BaseList, self).append(*args, **kwargs)
 
     def extend(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         return super(BaseList, self).extend(*args, **kwargs)
 
     def insert(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         return super(BaseList, self).insert(*args, **kwargs)
 
     def pop(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         return super(BaseList, self).pop(*args, **kwargs)
 
     def remove(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         return super(BaseList, self).remove(*args, **kwargs)
 
     def reverse(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         return super(BaseList, self).reverse(*args, **kwargs)
 
     def sort(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         return super(BaseList, self).sort(*args, **kwargs)
+
+    def _mark_as_changed(self):
+        """Marks a list as changed if has an instance and a name"""
+        if hasattr(self, 'instance') and hasattr(self, 'name'):
+            self.instance._mark_as_changed(self.name)
 
 
 class BaseDict(dict):
@@ -903,38 +963,41 @@ class BaseDict(dict):
         super(BaseDict, self).__init__(dict_items)
 
     def __setitem__(self, *args, **kwargs):
-        if hasattr(self, 'instance') and hasattr(self, 'name'):
-            self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         super(BaseDict, self).__setitem__(*args, **kwargs)
 
     def __setattr__(self, *args, **kwargs):
-        if hasattr(self, 'instance') and hasattr(self, 'name'):
-            self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         super(BaseDict, self).__setattr__(*args, **kwargs)
 
     def __delete__(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         super(BaseDict, self).__delete__(*args, **kwargs)
 
     def __delitem__(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         super(BaseDict, self).__delitem__(*args, **kwargs)
 
     def __delattr__(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         super(BaseDict, self).__delattr__(*args, **kwargs)
 
     def clear(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         super(BaseDict, self).clear(*args, **kwargs)
 
     def pop(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         super(BaseDict, self).clear(*args, **kwargs)
 
     def popitem(self, *args, **kwargs):
-        self.instance._mark_as_changed(self.name)
+        self._mark_as_changed()
         super(BaseDict, self).clear(*args, **kwargs)
+
+    def _mark_as_changed(self):
+        """Marks a dict as changed if has an instance and a name"""
+        if hasattr(self, 'instance') and hasattr(self, 'name'):
+            self.instance._mark_as_changed(self.name)
 
 if sys.version_info < (2, 5):
     # Prior to Python 2.5, Exception was an old-style class

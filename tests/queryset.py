@@ -1,6 +1,4 @@
 # -*- coding: utf-8 -*-
-
-
 import unittest
 import pymongo
 from datetime import datetime, timedelta
@@ -27,7 +25,7 @@ class QuerySetTest(unittest.TestCase):
         """
         self.assertTrue(isinstance(self.Person.objects, QuerySet))
         self.assertEqual(self.Person.objects._collection.name,
-                         self.Person._meta['collection'])
+                         self.Person._get_collection_name())
         self.assertTrue(isinstance(self.Person.objects._collection,
                                    pymongo.collection.Collection))
 
@@ -462,6 +460,18 @@ class QuerySetTest(unittest.TestCase):
         people2 = [person for person in queryset]
 
         self.assertEqual(people1, people2)
+
+    def test_repr_iteration(self):
+        """Ensure that QuerySet __repr__ can handle loops
+        """
+        self.Person(name='Person 1').save()
+        self.Person(name='Person 2').save()
+
+        queryset = self.Person.objects
+        self.assertEquals('[<Person: Person object>, <Person: Person object>]', repr(queryset))
+        for person in queryset:
+            self.assertEquals('.. queryset mid-iteration ..', repr(queryset))
+
 
     def test_regex_query_shortcuts(self):
         """Ensure that contains, startswith, endswith, etc work.
@@ -1116,6 +1126,11 @@ class QuerySetTest(unittest.TestCase):
         ]
         self.assertEqual(results, expected_results)
 
+        # Test template style
+        code = "{{~comments.content}}"
+        sub_code = BlogPost.objects._sub_js_fields(code)
+        self.assertEquals("cmnts.body", sub_code)
+
         BlogPost.drop_collection()
 
     def test_delete(self):
@@ -1636,6 +1651,64 @@ class QuerySetTest(unittest.TestCase):
         test_assertions(map_reduce)
 
         BlogPost.drop_collection()
+
+    def test_item_frequencies_on_embedded(self):
+        """Ensure that item frequencies are properly generated from lists.
+        """
+
+        class Phone(EmbeddedDocument):
+            number = StringField()
+
+        class Person(Document):
+            name = StringField()
+            phone = EmbeddedDocumentField(Phone)
+
+        Person.drop_collection()
+
+        doc = Person(name="Guido")
+        doc.phone = Phone(number='62-3331-1656')
+        doc.save()
+
+        doc = Person(name="Marr")
+        doc.phone = Phone(number='62-3331-1656')
+        doc.save()
+
+        doc = Person(name="WP Junior")
+        doc.phone = Phone(number='62-3332-1656')
+        doc.save()
+
+
+        def test_assertions(f):
+            f = dict((key, int(val)) for key, val in f.items())
+            self.assertEqual(set(['62-3331-1656', '62-3332-1656']), set(f.keys()))
+            self.assertEqual(f['62-3331-1656'], 2)
+            self.assertEqual(f['62-3332-1656'], 1)
+
+        exec_js = Person.objects.item_frequencies('phone.number')
+        map_reduce = Person.objects.item_frequencies('phone.number', map_reduce=True)
+        test_assertions(exec_js)
+        test_assertions(map_reduce)
+
+        # Ensure query is taken into account
+        def test_assertions(f):
+            f = dict((key, int(val)) for key, val in f.items())
+            self.assertEqual(set(['62-3331-1656']), set(f.keys()))
+            self.assertEqual(f['62-3331-1656'], 2)
+
+        exec_js = Person.objects(phone__number='62-3331-1656').item_frequencies('phone.number')
+        map_reduce = Person.objects(phone__number='62-3331-1656').item_frequencies('phone.number', map_reduce=True)
+        test_assertions(exec_js)
+        test_assertions(map_reduce)
+
+        # Check that normalization works
+        def test_assertions(f):
+            self.assertEqual(f['62-3331-1656'], 2.0/3.0)
+            self.assertEqual(f['62-3332-1656'], 1.0/3.0)
+
+        exec_js = Person.objects.item_frequencies('phone.number', normalize=True)
+        map_reduce = Person.objects.item_frequencies('phone.number', normalize=True, map_reduce=True)
+        test_assertions(exec_js)
+        test_assertions(map_reduce)
 
     def test_average(self):
         """Ensure that field can be averaged correctly.

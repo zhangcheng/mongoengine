@@ -21,12 +21,15 @@ class FieldTest(unittest.TestCase):
         """
         class Person(Document):
             name = StringField()
-            age = IntField(default=30)
-            userid = StringField(default=lambda: 'test')
+            age = IntField(default=30, help_text="Your real age")
+            userid = StringField(default=lambda: 'test', verbose_name="User Identity")
 
         person = Person(name='Test Person')
         self.assertEqual(person._data['age'], 30)
         self.assertEqual(person._data['userid'], 'test')
+        self.assertEqual(person._fields['name'].help_text, None)
+        self.assertEqual(person._fields['age'].help_text, "Your real age")
+        self.assertEqual(person._fields['userid'].verbose_name, "User Identity")
 
     def test_required_values(self):
         """Ensure that required field constraints are enforced.
@@ -374,6 +377,7 @@ class FieldTest(unittest.TestCase):
             comments = ListField(EmbeddedDocumentField(Comment))
             tags = ListField(StringField())
             authors = ListField(ReferenceField(User))
+            generic = ListField(GenericReferenceField())
 
         post = BlogPost(content='Went for a walk today...')
         post.validate()
@@ -401,7 +405,27 @@ class FieldTest(unittest.TestCase):
         self.assertRaises(ValidationError, post.validate)
 
         post.authors = [User()]
+        self.assertRaises(ValidationError, post.validate)
+
+        user = User()
+        user.save()
+        post.authors = [user]
         post.validate()
+
+        post.generic = [1, 2]
+        self.assertRaises(ValidationError, post.validate)
+
+        post.generic = [User(), Comment()]
+        self.assertRaises(ValidationError, post.validate)
+
+        post.generic = [Comment()]
+        self.assertRaises(ValidationError, post.validate)
+
+        post.generic = [user]
+        post.validate()
+
+        User.drop_collection()
+        BlogPost.drop_collection()
 
     def test_sorted_list_sorting(self):
         """Ensure that a sorted list field properly sorts values.
@@ -1287,6 +1311,27 @@ class FieldTest(unittest.TestCase):
         self.assertTrue(info[u'location_2d']['key'] == [(u'location', u'2d')])
 
         Event.drop_collection()
+
+    def test_geo_embedded_indexes(self):
+        """Ensure that indexes are created automatically for GeoPointFields on
+        embedded documents.
+        """
+        class Venue(EmbeddedDocument):
+            location = GeoPointField()
+            name = StringField()
+
+        class Event(Document):
+            title = StringField()
+            venue = EmbeddedDocumentField(Venue)
+
+        Event.drop_collection()
+        venue = Venue(name="Double Door", location=[41.909889, -87.677137])
+        event = Event(title="Coltrane Motion", venue=venue)
+        event.save()
+
+        info = Event.objects._collection.index_information()
+        self.assertTrue(u'location_2d' in info)
+        self.assertTrue(info[u'location_2d']['key'] == [(u'location', u'2d')])
 
     def test_ensure_unique_default_instances(self):
         """Ensure that every field has it's own unique default instance."""
