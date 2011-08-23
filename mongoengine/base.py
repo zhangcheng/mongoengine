@@ -8,7 +8,7 @@ import weakref
 import sys
 import pymongo
 import pymongo.objectid
-from operator import itemgetter
+import operator
 from functools import partial
 
 
@@ -163,70 +163,14 @@ class ComplexBaseField(BaseField):
     def __get__(self, instance, owner):
         """Descriptor to automatically dereference references.
         """
-        from connection import _get_db
-
         if instance is None:
             # Document class being used rather than a document object
             return self
 
-        # Get value from document instance if available
-        value_list = instance._data.get(self.name)
-        if not value_list or isinstance(value_list, basestring):
-            return super(ComplexBaseField, self).__get__(instance, owner)
-
-        is_list = False
-        if not hasattr(value_list, 'items'):
-            is_list = True
-            value_list = dict([(k,v) for k,v in enumerate(value_list)])
-
-        for k,v in value_list.items():
-            if isinstance(v, dict) and '_cls' in v and '_ref' not in v:
-                value_list[k] = get_document(v['_cls'])._from_son(v)
-
-        # Handle all dereferencing
-        db = _get_db()
-        dbref = {}
-        collections = {}
-        for k,v in value_list.items():
-
-            # Save any DBRefs
-            if isinstance(v, (pymongo.dbref.DBRef)):
-                # direct reference (DBRef)
-                collections.setdefault(v.collection, []).append((k,v))
-            elif isinstance(v, (dict, pymongo.son.SON)):
-                if '_ref' in v:
-                    # generic reference
-                    collection = get_document(v['_cls'])._get_collection_name()
-                    collections.setdefault(collection, []).append((k,v))
-                else:
-                    # Use BaseDict so can watch any changes
-                    dbref[k] = BaseDict(v, instance=instance, name=self.name)
-            else:
-                dbref[k] = v
-
-        # For each collection get the references
-        for collection, dbrefs in collections.items():
-            id_map = {}
-            for k,v in dbrefs:
-                if isinstance(v, (pymongo.dbref.DBRef)):
-                    # direct reference (DBRef), has no _cls information
-                    id_map[v.id] = (k, None)
-                elif isinstance(v, (dict, pymongo.son.SON)) and '_ref' in v:
-                    # generic reference - includes _cls information
-                    id_map[v['_ref'].id] = (k, get_document(v['_cls']))
-
-            references = db[collection].find({'_id': {'$in': id_map.keys()}})
-            for ref in references:
-                key, doc_cls = id_map[ref['_id']]
-                if not doc_cls:  # If no doc_cls get it from the referenced doc
-                    doc_cls = get_document(ref['_cls'])
-                dbref[key] = doc_cls._from_son(ref)
-
-        if is_list:
-            dbref = BaseList([v for k,v in sorted(dbref.items(), key=itemgetter(0))], instance=instance, name=self.name)
-        else:
-            dbref = BaseDict(dbref, instance=instance, name=self.name)
-        instance._data[self.name] = dbref
+        from dereference import dereference
+        instance._data[self.name] = dereference(
+            instance._data.get(self.name), max_depth=1, instance=instance, name=self.name, get=True
+        )
         return super(ComplexBaseField, self).__get__(instance, owner)
 
     def to_python(self, value):
@@ -266,7 +210,7 @@ class ComplexBaseField(BaseField):
                     value_dict[k] = self.to_python(v)
 
         if is_list:  # Convert back to a list
-            return [v for k,v in sorted(value_dict.items(), key=itemgetter(0))]
+            return [v for k,v in sorted(value_dict.items(), key=operator.itemgetter(0))]
         return value_dict
 
     def to_mongo(self, value):
@@ -315,7 +259,7 @@ class ComplexBaseField(BaseField):
                     value_dict[k] = self.to_mongo(v)
 
         if is_list:  # Convert back to a list
-            return [v for k,v in sorted(value_dict.items(), key=itemgetter(0))]
+            return [v for k,v in sorted(value_dict.items(), key=operator.itemgetter(0))]
         return value_dict
 
     def validate(self, value):
@@ -395,7 +339,6 @@ class DocumentMetaclass(type):
             # Include all fields present in superclasses
             if hasattr(base, '_fields'):
                 doc_fields.update(base._fields)
-                class_name.append(base._class_name)
                 # Get superclasses from superclass
                 superclasses[base._class_name] = base
                 superclasses.update(base._superclasses)
@@ -407,6 +350,7 @@ class DocumentMetaclass(type):
                 # Ensure that the Document class may be subclassed -
                 # inheritance may be disabled to remove dependency on
                 # additional fields _cls and _types
+                class_name.append(base._class_name)
                 if base._meta.get('allow_inheritance', True) == False:
                     raise ValueError('Document %s may not be subclassed' %
                                      base.__name__)
@@ -437,6 +381,8 @@ class DocumentMetaclass(type):
                     attr_value.db_field = attr_name
                 doc_fields[attr_name] = attr_value
         attrs['_fields'] = doc_fields
+        attrs['_db_field_map'] = dict([(k, v.db_field) for k, v in doc_fields.items() if k!=v.db_field])
+        attrs['_reverse_db_field_map'] = dict([(v, k) for k, v in attrs['_db_field_map'].items()])
 
         new_class = super_new(cls, name, bases, attrs)
         for field in new_class._fields.values():
@@ -501,7 +447,6 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
         # Subclassed documents inherit collection from superclass
         for base in bases:
             if hasattr(base, '_meta'):
-
                 if 'collection' in attrs.get('meta', {}) and not base._meta.get('abstract', False):
                     import warnings
                     msg = "Trying to set a collection on a subclass (%s)" % name
@@ -519,14 +464,20 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
                 # Propagate 'allow_inheritance'
                 if 'allow_inheritance' in base._meta:
                     base_meta['allow_inheritance'] = base._meta['allow_inheritance']
+                if 'queryset_class' in base._meta:
+                    base_meta['queryset_class'] = base._meta['queryset_class']
+            try:
+                base_meta['objects'] = base.__getattribute__(base, 'objects')
+            except AttributeError:
+                pass
 
         meta = {
             'abstract': False,
             'collection': collection,
             'max_documents': None,
             'max_size': None,
-            'ordering': [], # default ordering applied at runtime
-            'indexes': [], # indexes to be ensured at runtime
+            'ordering': [],  # default ordering applied at runtime
+            'indexes': [],  # indexes to be ensured at runtime
             'id_field': id_field,
             'index_background': False,
             'index_drop_dups': False,
@@ -550,7 +501,7 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
             new_class._meta['collection'] = collection(new_class)
 
         # Provide a default queryset unless one has been manually provided
-        manager = attrs.get('objects', QuerySetManager())
+        manager = attrs.get('objects', meta.get('objects', QuerySetManager()))
         if hasattr(manager, 'queryset_class'):
             meta['queryset_class'] = manager.queryset_class
         new_class.objects = manager
@@ -626,6 +577,7 @@ class BaseDocument(object):
         signals.pre_init.send(self.__class__, document=self, values=values)
 
         self._data = {}
+        self._initialised = False
         # Assign default values to instance
         for attr_name, field in self._fields.items():
             value = getattr(self, attr_name, None)
@@ -641,7 +593,8 @@ class BaseDocument(object):
 
         # Set any get_fieldname_display methods
         self.__set_field_display()
-
+        # Flag initialised
+        self._initialised = True
         signals.post_init.send(self.__class__, document=self)
 
     def validate(self):
@@ -752,6 +705,7 @@ class BaseDocument(object):
         """
         if not key:
             return
+        key = self._db_field_map.get(key, key)
         if hasattr(self, '_changed_fields') and key not in self._changed_fields:
             self._changed_fields.append(key)
 
@@ -761,18 +715,24 @@ class BaseDocument(object):
         from mongoengine import EmbeddedDocument
         _changed_fields = []
         _changed_fields += getattr(self, '_changed_fields', [])
-
         for field_name in self._fields:
-            key = '%s.' % field_name
+            db_field_name = self._db_field_map.get(field_name, field_name)
+            key = '%s.' % db_field_name
             field = getattr(self, field_name, None)
-            if isinstance(field, EmbeddedDocument) and field_name not in _changed_fields:  # Grab all embedded fields that have been changed
+            if isinstance(field, EmbeddedDocument) and db_field_name not in _changed_fields:  # Grab all embedded fields that have been changed
                 _changed_fields += ["%s%s" % (key, k) for k in field._get_changed_fields(key) if k]
-            elif isinstance(field, (list, tuple)) and field_name not in _changed_fields:  # Loop list fields as they contain documents
-                for index, value in enumerate(field):
+            elif isinstance(field, (list, tuple, dict)) and db_field_name not in _changed_fields:  # Loop list / dict fields as they contain documents
+                # Determine the iterator to use
+                if not hasattr(field, 'items'):
+                    iterator = enumerate(field)
+                else:
+                    iterator = field.iteritems()
+                for index, value in iterator:
                     if not hasattr(value, '_get_changed_fields'):
                         continue
                     list_key = "%s%s." % (key, index)
                     _changed_fields += ["%s%s" % (list_key, k) for k in value._get_changed_fields(list_key) if k]
+
         return _changed_fields
 
     def _delta(self):
@@ -803,18 +763,57 @@ class BaseDocument(object):
             if '_id' in set_data:
                 del(set_data['_id'])
 
-        for k,v in set_data.items():
-            if not v:
-                del(set_data[k])
-                unset_data[k] = 1
+        # Determine if any changed items were actually unset.
+        for path, value in set_data.items():
+            if value:
+                continue
+
+            # If we've set a value that ain't the default value dont unset it.
+            default = None
+
+            if path in self._fields:
+                default = self._fields[path].default
+            else:  # Perform a full lookup for lists / embedded lookups
+                d = self
+                parts = path.split('.')
+                db_field_name = parts.pop()
+                for p in parts:
+                    if p.isdigit():
+                        d = d[int(p)]
+                    elif hasattr(d, '__getattribute__') and not isinstance(d, dict):
+                        real_path = d._reverse_db_field_map.get(p, p)
+                        d = getattr(d, real_path)
+                    else:
+                        d = d.get(p)
+
+                if hasattr(d, '_fields'):
+                    field_name = d._reverse_db_field_map.get(db_field_name,
+                                                             db_field_name)
+
+                    default = d._fields[field_name].default
+
+            if default is not None:
+                if callable(default):
+                    default = default()
+            if default != value:
+                continue
+
+            del(set_data[path])
+            unset_data[path] = 1
         return set_data, unset_data
 
     @classmethod
-    def _geo_indices(cls):
+    def _geo_indices(cls, inspected_classes=None):
+        inspected_classes = inspected_classes or []
         geo_indices = []
+        inspected_classes.append(cls)
         for field in cls._fields.values():
             if hasattr(field, 'document_type'):
-                geo_indices += field.document_type._geo_indices()
+                field_cls = field.document_type
+                if field_cls in inspected_classes:
+                    continue
+                if hasattr(field_cls, '_geo_indices'):
+                    geo_indices += field_cls._geo_indices(inspected_classes)
             elif field._geo_index:
                 geo_indices.append(field)
         return geo_indices
@@ -907,7 +906,7 @@ class BaseList(list):
     """
 
     def __init__(self, list_items, instance, name):
-        self.instance = weakref.proxy(instance)
+        self.instance = instance
         self.name = name
         super(BaseList, self).__init__(list_items)
 
@@ -958,7 +957,7 @@ class BaseDict(dict):
     """
 
     def __init__(self, dict_items, instance, name):
-        self.instance = weakref.proxy(instance)
+        self.instance = instance
         self.name = name
         super(BaseDict, self).__init__(dict_items)
 

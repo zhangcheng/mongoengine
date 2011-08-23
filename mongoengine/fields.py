@@ -20,7 +20,8 @@ __all__ = ['StringField', 'IntField', 'FloatField', 'BooleanField',
            'ObjectIdField', 'ReferenceField', 'ValidationError', 'MapField',
            'DecimalField', 'ComplexDateTimeField', 'URLField',
            'GenericReferenceField', 'FileField', 'BinaryField',
-           'SortedListField', 'EmailField', 'GeoPointField']
+           'SortedListField', 'EmailField', 'GeoPointField',
+           'SequenceField']
 
 RECURSIVE_REFERENCE_CONSTANT = 'self'
 
@@ -619,7 +620,7 @@ class GenericReferenceField(BaseField):
     """A reference to *any* :class:`~mongoengine.document.Document` subclass
     that will be automatically dereferenced on access (lazily).
 
-    note:  Any documents used as a generic reference must be registered in the
+    ..note ::  Any documents used as a generic reference must be registered in the
     document registry.  Importing the model will automatically register it.
 
     .. versionadded:: 0.3
@@ -653,6 +654,9 @@ class GenericReferenceField(BaseField):
         return doc
 
     def to_mongo(self, document):
+        if document is None:
+            return None
+
         id_field_name = document.__class__._meta['id_field']
         id_field = document.__class__._fields[id_field_name]
 
@@ -723,6 +727,9 @@ class GridFSProxy(object):
     def __get__(self, instance, value):
         return self
 
+    def __nonzero__(self):
+        return bool(self.grid_id)
+
     def get(self, id=None):
         if id:
             self.grid_id = id
@@ -775,11 +782,6 @@ class GridFSProxy(object):
         self.gridout = None
         self._mark_as_changed()
 
-    def _mark_as_changed(self):
-        """Inform the instance that `self.key` has been changed"""
-        if self.instance:
-            self.instance._mark_as_changed(self.key)
-
     def replace(self, file_obj, **kwargs):
         self.delete()
         self.put(file_obj, **kwargs)
@@ -787,6 +789,11 @@ class GridFSProxy(object):
     def close(self):
         if self.newfile:
             self.newfile.close()
+
+    def _mark_as_changed(self):
+        """Inform the instance that `self.key` has been changed"""
+        if self.instance:
+            self.instance._mark_as_changed(self.key)
 
 
 class FileField(BaseField):
@@ -805,7 +812,7 @@ class FileField(BaseField):
         # Check if a file already exists for this model
         grid_file = instance._data.get(self.name)
         self.grid_file = grid_file
-        if self.grid_file:
+        if isinstance(self.grid_file, GridFSProxy):
             if not self.grid_file.key:
                 self.grid_file.key = self.name
                 self.grid_file.instance = instance
@@ -870,3 +877,61 @@ class GeoPointField(BaseField):
         if (not isinstance(value[0], (float, int)) and
             not isinstance(value[1], (float, int))):
             raise ValidationError('Both values in point must be float or int.')
+
+
+class SequenceField(IntField):
+    """Provides a sequental counter.
+
+    ..note:: Although traditional databases often use increasing sequence
+             numbers for primary keys. In MongoDB, the preferred approach is to
+             use Object IDs instead.  The concept is that in a very large
+             cluster of machines, it is easier to create an object ID than have
+             global, uniformly increasing sequence numbers.
+
+    .. versionadded:: 0.5
+    """
+    def __init__(self, collection_name=None, *args, **kwargs):
+        self.collection_name = collection_name or 'mongoengine.counters'
+        return super(SequenceField, self).__init__(*args, **kwargs)
+
+    def generate_new_value(self):
+        """
+        Generate and Increment the counter
+        """
+        sequence_id = "{0}.{1}".format(self.owner_document._get_collection_name(),
+                                       self.name)
+        collection = _get_db()[self.collection_name]
+        counter = collection.find_and_modify(query={"_id": sequence_id},
+                                             update={"$inc": {"next": 1}},
+                                             new=True,
+                                             upsert=True)
+        return counter['next']
+
+    def __get__(self, instance, owner):
+
+        if instance is None:
+            return self
+
+        if not instance._data:
+            return
+
+        value = instance._data.get(self.name)
+
+        if not value and instance._initialised:
+            value = self.generate_new_value()
+            instance._data[self.name] = value
+            instance._mark_as_changed(self.name)
+
+        return value
+
+    def __set__(self, instance, value):
+
+        if value is None and instance._initialised:
+            value = self.generate_new_value()
+
+        return super(SequenceField, self).__set__(instance, value)
+
+    def to_python(self, value):
+        if value is None:
+            value = self.generate_new_value()
+        return value

@@ -112,7 +112,7 @@ class Document(BaseDocument):
                 self._collection = db[collection_name]
         return self._collection
 
-    def save(self, safe=True, force_insert=False, validate=True, write_options=None):
+    def save(self, safe=True, force_insert=False, validate=True, write_options=None, _refs=None):
         """Save the :class:`~mongoengine.Document` to the database. If the
         document already exists, it will be updated, otherwise it will be
         created.
@@ -131,6 +131,8 @@ class Document(BaseDocument):
                 For example, ``save(..., w=2, fsync=True)`` will wait until at least two servers
                 have recorded the write and will force an fsync on each server being written to.
         """
+        from fields import ReferenceField, GenericReferenceField
+
         signals.pre_save.send(self.__class__, document=self)
 
         if validate:
@@ -140,13 +142,16 @@ class Document(BaseDocument):
             write_options = {}
 
         doc = self.to_mongo()
-        created = '_id' not in doc
+
+        created = '_id' in doc
+        creation_mode = force_insert or not created
         try:
             collection = self.__class__.objects._collection
-            if force_insert:
-                object_id = collection.insert(doc, safe=safe, **write_options)
-            if created:
-                object_id = collection.save(doc, safe=safe, **write_options)
+            if creation_mode:
+                if force_insert:
+                    object_id = collection.insert(doc, safe=safe, **write_options)
+                else:
+                    object_id = collection.save(doc, safe=safe, **write_options)
             else:
                 object_id = doc['_id']
                 updates, removals = self._delta()
@@ -154,6 +159,18 @@ class Document(BaseDocument):
                     collection.update({'_id': object_id}, {"$set": updates}, upsert=True, safe=safe, **write_options)
                 if removals:
                     collection.update({'_id': object_id}, {"$unset": removals}, upsert=True, safe=safe, **write_options)
+
+            # Save any references / generic references
+            _refs = _refs or []
+            for name, cls in self._fields.items():
+                if isinstance(cls, (ReferenceField, GenericReferenceField)):
+                    ref = getattr(self, name)
+                    if ref and str(ref) not in _refs:
+                        _refs.append(str(ref))
+                        ref.save(safe=safe, force_insert=force_insert,
+                                 validate=validate, write_options=write_options,
+                                 _refs=_refs)
+
         except pymongo.errors.OperationFailure, err:
             message = 'Could not save document (%s)'
             if u'duplicate key' in unicode(err):
@@ -161,8 +178,34 @@ class Document(BaseDocument):
             raise OperationError(message % unicode(err))
         id_field = self._meta['id_field']
         self[id_field] = self._fields[id_field].to_python(object_id)
-        self._changed_fields = []
-        signals.post_save.send(self.__class__, document=self, created=created)
+
+        def reset_changed_fields(doc, inspected_docs=None):
+            """Loop through and reset changed fields lists"""
+
+            inspected_docs = inspected_docs or []
+            inspected_docs.append(doc)
+            if hasattr(doc, '_changed_fields'):
+                doc._changed_fields = []
+
+            for field_name in doc._fields:
+                field = getattr(doc, field_name)
+                if field not in inspected_docs and hasattr(field, '_changed_fields'):
+                    reset_changed_fields(field, inspected_docs)
+
+        reset_changed_fields(self)
+        signals.post_save.send(self.__class__, document=self, created=creation_mode)
+
+    def update(self, **kwargs):
+        """Performs an update on the :class:`~mongoengine.Document`
+        A convenience wrapper to :meth:`~mongoengine.QuerySet.update`.
+
+        Raises :class:`OperationError` if called on an object that has not yet
+        been saved.
+        """
+        if not self.pk:
+            raise OperationError('attempt to update a document not yet saved')
+
+        return self.__class__.objects(pk=self.pk).update_one(**kwargs)
 
     def delete(self, safe=False):
         """Delete the :class:`~mongoengine.Document` from the database. This
@@ -181,6 +224,11 @@ class Document(BaseDocument):
             raise OperationError(message)
 
         signals.post_delete.send(self.__class__, document=self)
+
+    def select_related(self, max_depth=1):
+        from dereference import dereference
+        self._data = dereference(self._data, max_depth)
+        return self
 
     def reload(self):
         """Reloads all attributes from the database.

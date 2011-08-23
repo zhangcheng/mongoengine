@@ -7,6 +7,7 @@ from mongoengine.queryset import (QuerySet, QuerySetManager,
                                   MultipleObjectsReturned, DoesNotExist,
                                   QueryFieldList)
 from mongoengine import *
+from mongoengine.connection import _get_connection
 from mongoengine.tests import query_counter
 
 
@@ -14,7 +15,7 @@ class QuerySetTest(unittest.TestCase):
 
     def setUp(self):
         connect(db='mongoenginetest')
-
+        
         class Person(Document):
             name = StringField()
             age = IntField()
@@ -211,6 +212,42 @@ class QuerySetTest(unittest.TestCase):
 
         Blog.drop_collection()
 
+    def test_update_write_options(self):
+        """Test that passing write_options works"""
+
+        self.Person.drop_collection()
+
+        write_options = {"fsync": True}
+
+        author, created = self.Person.objects.get_or_create(
+                            name='Test User', write_options=write_options)
+        author.save(write_options=write_options)
+
+        self.Person.objects.update(set__name='Ross', write_options=write_options)
+
+        author = self.Person.objects.first()
+        self.assertEquals(author.name, 'Ross')
+
+        self.Person.objects.update_one(set__name='Test User', write_options=write_options)
+        author = self.Person.objects.first()
+        self.assertEquals(author.name, 'Test User')
+
+    def test_update_update_has_a_value(self):
+        """Test to ensure that update is passed a value to update to"""
+        self.Person.drop_collection()
+
+        author = self.Person(name='Test User')
+        author.save()
+
+        def update_raises():
+            self.Person.objects(pk=author.pk).update({})
+
+        def update_one_raises():
+            self.Person.objects(pk=author.pk).update_one({})
+
+        self.assertRaises(OperationError, update_raises)
+        self.assertRaises(OperationError, update_one_raises)
+
     def test_update_array_position(self):
         """Ensure that updating by array position works.
 
@@ -259,6 +296,77 @@ class QuerySetTest(unittest.TestCase):
         self.assertRaises(InvalidQueryError, non_list_indexing)
 
         Blog.drop_collection()
+
+    def test_update_using_positional_operator(self):
+        """Ensure that the list fields can be updated using the positional
+        operator."""
+
+        class Comment(EmbeddedDocument):
+            by = StringField()
+            votes = IntField()
+
+        class BlogPost(Document):
+            title = StringField()
+            comments = ListField(EmbeddedDocumentField(Comment))
+
+        BlogPost.drop_collection()
+
+        c1 = Comment(by="joe", votes=3)
+        c2 = Comment(by="jane", votes=7)
+
+        BlogPost(title="ABC", comments=[c1, c2]).save()
+
+        BlogPost.objects(comments__by="joe").update(inc__comments__S__votes=1)
+
+        post = BlogPost.objects.first()
+        self.assertEquals(post.comments[0].by, 'joe')
+        self.assertEquals(post.comments[0].votes, 4)
+
+        # Currently the $ operator only applies to the first matched item in
+        # the query
+
+        class Simple(Document):
+            x = ListField()
+
+        Simple.drop_collection()
+        Simple(x=[1, 2, 3, 2]).save()
+        Simple.objects(x=2).update(inc__x__S=1)
+
+        simple = Simple.objects.first()
+        self.assertEquals(simple.x, [1, 3, 3, 2])
+        Simple.drop_collection()
+
+        # You can set multiples
+        Simple.drop_collection()
+        Simple(x=[1, 2, 3, 4]).save()
+        Simple(x=[2, 3, 4, 5]).save()
+        Simple(x=[3, 4, 5, 6]).save()
+        Simple(x=[4, 5, 6, 7]).save()
+        Simple.objects(x=3).update(set__x__S=0)
+
+        s = Simple.objects()
+        self.assertEquals(s[0].x, [1, 2, 0, 4])
+        self.assertEquals(s[1].x, [2, 0, 4, 5])
+        self.assertEquals(s[2].x, [0, 4, 5, 6])
+        self.assertEquals(s[3].x, [4, 5, 6, 7])
+
+        # Using "$unset" with an expression like this "array.$" will result in
+        # the array item becoming None, not being removed.
+        Simple.drop_collection()
+        Simple(x=[1, 2, 3, 4, 3, 2, 3, 4]).save()
+        Simple.objects(x=3).update(unset__x__S=1)
+        simple = Simple.objects.first()
+        self.assertEquals(simple.x, [1, 2, None, 4, 3, 2, 3, 4])
+
+        # Nested updates arent supported yet..
+        def update_nested():
+            Simple.drop_collection()
+            Simple(x=[{'test': [1, 2, 3, 4]}]).save()
+            Simple.objects(x__test=2).update(set__x__S__test__S=3)
+            self.assertEquals(simple.x, [1, 2, 3, 4])
+
+        self.assertRaises(OperationError, update_nested)
+        Simple.drop_collection()
 
     def test_mapfield_update(self):
         """Ensure that the MapField can be updated."""
@@ -1710,6 +1818,28 @@ class QuerySetTest(unittest.TestCase):
         test_assertions(exec_js)
         test_assertions(map_reduce)
 
+    def test_item_frequencies_null_values(self):
+
+        class Person(Document):
+            name = StringField()
+            city = StringField()
+
+        Person.drop_collection()
+
+        Person(name="Wilson Snr", city="CRB").save()
+        Person(name="Wilson Jr").save()
+
+        freq = Person.objects.item_frequencies('city')
+        self.assertEquals(freq, {'CRB': 1.0, None: 1.0})
+        freq = Person.objects.item_frequencies('city', normalize=True)
+        self.assertEquals(freq, {'CRB': 0.5, None: 0.5})
+
+
+        freq = Person.objects.item_frequencies('city', map_reduce=True)
+        self.assertEquals(freq, {'CRB': 1.0, None: 1.0})
+        freq = Person.objects.item_frequencies('city', normalize=True, map_reduce=True)
+        self.assertEquals(freq, {'CRB': 0.5, None: 0.5})
+
     def test_average(self):
         """Ensure that field can be averaged correctly.
         """
@@ -2067,7 +2197,32 @@ class QuerySetTest(unittest.TestCase):
         events = Event.objects(location__within_box=box)
         self.assertEqual(events.count(), 1)
         self.assertEqual(events[0].id, event2.id)
-
+        
+        # check that polygon works for users who have a server >= 1.9
+        server_version = tuple(
+            _get_connection().server_info()['version'].split('.')
+        )
+        required_version = tuple("1.9.0".split("."))
+        if server_version >= required_version:
+            polygon = [
+                (41.912114,-87.694445),
+                (41.919395,-87.69084),
+                (41.927186,-87.681742),
+                (41.911731,-87.654276),
+                (41.898061,-87.656164),
+            ]
+            events = Event.objects(location__within_polygon=polygon)
+            self.assertEqual(events.count(), 1)
+            self.assertEqual(events[0].id, event1.id)
+            
+            polygon2 = [
+                (54.033586,-1.742249),
+                (52.792797,-1.225891),
+                (53.389881,-4.40094)
+            ]
+            events = Event.objects(location__within_polygon=polygon2)
+            self.assertEqual(events.count(), 0)
+            
         Event.drop_collection()
 
     def test_spherical_geospatial_operators(self):
@@ -2186,6 +2341,56 @@ class QuerySetTest(unittest.TestCase):
         Post(is_published=True).save()
         self.assertEquals(Post.objects.count(), 2)
         self.assertEquals(Post.published.count(), 1)
+
+        Post.drop_collection()
+
+    def test_custom_querysets_inherited(self):
+        """Ensure that custom QuerySet classes may be used.
+        """
+
+        class CustomQuerySet(QuerySet):
+            def not_empty(self):
+                return len(self) > 0
+
+        class Base(Document):
+            meta = {'abstract': True, 'queryset_class': CustomQuerySet}
+
+        class Post(Base):
+            pass
+
+        Post.drop_collection()
+        self.assertTrue(isinstance(Post.objects, CustomQuerySet))
+        self.assertFalse(Post.objects.not_empty())
+
+        Post().save()
+        self.assertTrue(Post.objects.not_empty())
+
+        Post.drop_collection()
+
+    def test_custom_querysets_inherited_direct(self):
+        """Ensure that custom QuerySet classes may be used.
+        """
+
+        class CustomQuerySet(QuerySet):
+            def not_empty(self):
+                return len(self) > 0
+
+        class CustomQuerySetManager(QuerySetManager):
+            queryset_class = CustomQuerySet
+
+        class Base(Document):
+            meta = {'abstract': True}
+            objects = CustomQuerySetManager()
+
+        class Post(Base):
+            pass
+
+        Post.drop_collection()
+        self.assertTrue(isinstance(Post.objects, CustomQuerySet))
+        self.assertFalse(Post.objects.not_empty())
+
+        Post().save()
+        self.assertTrue(Post.objects.not_empty())
 
         Post.drop_collection()
 
@@ -2322,6 +2527,47 @@ class QuerySetTest(unittest.TestCase):
                  value.get('sparse', False))
                 for key, value in info.iteritems()]
         self.assertTrue(([('_types', 1), ('message', 1)], False, False) in info)
+
+    def test_where(self):
+        """Ensure that where clauses work.
+        """
+
+        class IntPair(Document):
+            fielda = IntField()
+            fieldb = IntField()
+
+        IntPair.objects._collection.remove()
+
+        a = IntPair(fielda=1, fieldb=1)
+        b = IntPair(fielda=1, fieldb=2)
+        c = IntPair(fielda=2, fieldb=1)
+        a.save()
+        b.save()
+        c.save()
+
+        query = IntPair.objects.where('this[~fielda] >= this[~fieldb]')
+        self.assertEqual('this["fielda"] >= this["fieldb"]', query._where_clause)
+        results = list(query)
+        self.assertEqual(2, len(results))
+        self.assertTrue(a in results)
+        self.assertTrue(c in results)
+
+        query = IntPair.objects.where('this[~fielda] == this[~fieldb]')
+        results = list(query)
+        self.assertEqual(1, len(results))
+        self.assertTrue(a in results)
+
+        query = IntPair.objects.where('function() { return this[~fielda] >= this[~fieldb] }')
+        self.assertEqual('function() { return this["fielda"] >= this["fieldb"] }', query._where_clause)
+        results = list(query)
+        self.assertEqual(2, len(results))
+        self.assertTrue(a in results)
+        self.assertTrue(c in results)
+
+        def invalid_where():
+            list(IntPair.objects.where(fielda__gte=3))
+
+        self.assertRaises(TypeError, invalid_where)
 
 
 class QTest(unittest.TestCase):

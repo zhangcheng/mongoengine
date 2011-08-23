@@ -879,7 +879,7 @@ class FieldTest(unittest.TestCase):
             name = StringField()
             children = ListField(EmbeddedDocumentField('self'))
 
-        Tree.drop_collection
+        Tree.drop_collection()
         tree = Tree(name="Tree")
 
         first_child = TreeNode(name="Child 1")
@@ -887,9 +887,15 @@ class FieldTest(unittest.TestCase):
 
         second_child = TreeNode(name="Child 2")
         first_child.children.append(second_child)
+        tree.save()
+
+        tree = Tree.objects.first()
+        self.assertEqual(len(tree.children), 1)
+
+        self.assertEqual(len(tree.children[0].children), 1)
 
         third_child = TreeNode(name="Child 3")
-        first_child.children.append(third_child)
+        tree.children[0].children.append(third_child)
         tree.save()
 
         self.assertEqual(len(tree.children), 1)
@@ -1088,6 +1094,18 @@ class FieldTest(unittest.TestCase):
 
         Link.drop_collection()
         User.drop_collection()
+
+    def test_generic_reference_is_none(self):
+
+        class Person(Document):
+            name = StringField()
+            city = GenericReferenceField()
+
+        Person.drop_collection()
+        Person(name="Wilson Jr").save()
+
+        self.assertEquals(repr(Person.objects(city=None)),
+                            "[<Person: Person object>]")
 
     def test_binary_fields(self):
         """Ensure that binary fields can be stored and retrieved.
@@ -1294,6 +1312,21 @@ class FieldTest(unittest.TestCase):
 
         TestFile.drop_collection()
 
+    def test_file_boolean(self):
+        """Ensure that a boolean test of a FileField indicates its presence
+        """
+        class TestFile(Document):
+            file = FileField()
+
+        testfile = TestFile()
+        self.assertFalse(bool(testfile.file))
+        testfile.file = 'Hello, World!'
+        testfile.file.content_type = 'text/plain'
+        testfile.save()
+        self.assertTrue(bool(testfile.file))
+
+        TestFile.drop_collection()
+
     def test_geo_indexes(self):
         """Ensure that indexes are created automatically for GeoPointFields.
         """
@@ -1345,6 +1378,114 @@ class FieldTest(unittest.TestCase):
         d2 = D()
         self.assertEqual(d2.data, {})
         self.assertEqual(d2.data2, {})
+
+    def test_sequence_field(self):
+        class Person(Document):
+            id = SequenceField(primary_key=True)
+            name = StringField()
+
+        self.db['mongoengine.counters'].drop()
+        Person.drop_collection()
+
+        for x in xrange(10):
+            p = Person(name="Person %s" % x)
+            p.save()
+
+        c = self.db['mongoengine.counters'].find_one({'_id': 'person.id'})
+        self.assertEqual(c['next'], 10)
+
+        ids = [i.id for i in Person.objects]
+        self.assertEqual(ids, range(1, 11))
+
+        c = self.db['mongoengine.counters'].find_one({'_id': 'person.id'})
+        self.assertEqual(c['next'], 10)
+
+    def test_multiple_sequence_fields(self):
+        class Person(Document):
+            id = SequenceField(primary_key=True)
+            counter = SequenceField()
+            name = StringField()
+
+        self.db['mongoengine.counters'].drop()
+        Person.drop_collection()
+
+        for x in xrange(10):
+            p = Person(name="Person %s" % x)
+            p.save()
+
+        c = self.db['mongoengine.counters'].find_one({'_id': 'person.id'})
+        self.assertEqual(c['next'], 10)
+
+        ids = [i.id for i in Person.objects]
+        self.assertEqual(ids, range(1, 11))
+
+        counters = [i.counter for i in Person.objects]
+        self.assertEqual(counters, range(1, 11))
+
+        c = self.db['mongoengine.counters'].find_one({'_id': 'person.id'})
+        self.assertEqual(c['next'], 10)
+
+    def test_sequence_fields_reload(self):
+        class Animal(Document):
+            counter = SequenceField()
+            type = StringField()
+
+        self.db['mongoengine.counters'].drop()
+        Animal.drop_collection()
+
+        a = Animal(type="Boi")
+        a.save()
+
+        self.assertEqual(a.counter, 1)
+        a.reload()
+        self.assertEqual(a.counter, 1)
+
+        a.counter = None
+        self.assertEqual(a.counter, 2)
+        a.save()
+
+        self.assertEqual(a.counter, 2)
+        
+        a = Animal.objects.first()
+        self.assertEqual(a.counter, 2)
+        a.reload()
+        self.assertEqual(a.counter, 2)
+
+    def test_multiple_sequence_fields_on_docs(self):
+
+        class Animal(Document):
+            id = SequenceField(primary_key=True)
+
+        class Person(Document):
+            id = SequenceField(primary_key=True)
+
+        self.db['mongoengine.counters'].drop()
+        Animal.drop_collection()
+        Person.drop_collection()
+
+        for x in xrange(10):
+            a = Animal(name="Animal %s" % x)
+            a.save()
+            p = Person(name="Person %s" % x)
+            p.save()
+
+        c = self.db['mongoengine.counters'].find_one({'_id': 'person.id'})
+        self.assertEqual(c['next'], 10)
+
+        c = self.db['mongoengine.counters'].find_one({'_id': 'animal.id'})
+        self.assertEqual(c['next'], 10)
+
+        ids = [i.id for i in Person.objects]
+        self.assertEqual(ids, range(1, 11))
+
+        id = [i.id for i in Animal.objects]
+        self.assertEqual(id, range(1, 11))
+
+        c = self.db['mongoengine.counters'].find_one({'_id': 'person.id'})
+        self.assertEqual(c['next'], 10)
+
+        c = self.db['mongoengine.counters'].find_one({'_id': 'animal.id'})
+        self.assertEqual(c['next'], 10)
 
 
 if __name__ == '__main__':
